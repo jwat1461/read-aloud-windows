@@ -14,7 +14,7 @@ accounts, no network calls, no pip installs.
 | | What it does | How you start it |
 |---|---|---|
 | **Desktop app** | Paste text, press Read. Sentence-by-sentence highlighting, voice/speed/volume, save to WAV. | `Read Aloud.bat` |
-| **Read Aloud Anywhere** | Global hotkeys. Select text in Word, a PDF, Slack, anywhere — press `Ctrl+Alt+R`. | `Read Aloud Anywhere.bat` |
+| **Read Aloud Anywhere** | Tray icon + global hotkeys. Select text in Word, a PDF, Slack, anywhere — press `Ctrl+Alt+R`. | `Read Aloud Anywhere.bat` |
 | **Chrome extension** | Highlight text on a page → right-click → **Read aloud**. Highlights each sentence as it reads. | Load `extension\` in Chrome |
 | **Explorer menu** | Right-click a `.txt`/`.md`/`.sql`/… file → **Read aloud**. | `Add Right-Click Menu.bat` |
 
@@ -67,15 +67,36 @@ mid-sentence re-reads that sentence so you hear the change immediately.
 .\"Read Aloud Anywhere.bat"
 ```
 
-A small always-on-top window appears and then stays out of the way. From then
-on, in **any** application:
+It puts a **W** icon in the notification area by the clock and stays out of the
+way. From then on, in **any** application:
 
 | Hotkey | Action |
 |---|---|
-| `Ctrl+Alt+R` | Read the text selected in the active window |
+| `Ctrl+Alt+R` | Read the selected text — **press again to stop** |
 | `Ctrl+Alt+C` | Read whatever is on the clipboard |
 | `Ctrl+Alt+P` | Pause / resume |
 | `Ctrl+Alt+S` | Stop |
+
+### The tray icon
+
+**Right-click the W by the clock** to change things without opening anything:
+
+- **Voice** — every installed voice, with the current one ticked
+- **Speed** — Very slow · Slow · Normal · Fast · Faster · Fastest
+- **Volume** — Mute · 25% · 50% · 75% · 100%
+- Read selection · Read clipboard · Pause · **Stop reading**
+- Open Read Aloud · Quit
+
+Left-click the icon to open the window, which has the same voice dropdown plus
+speed and volume sliders for finer control than the menu presets. Closing that
+window hides it back to the tray; **Quit** is how you actually exit.
+
+> On Windows 11 new tray icons start in the hidden-icons flyout — click the `^`
+> next to the clock, then drag the W onto the taskbar to keep it visible.
+
+Every one of these is the same setting: change the speed in the tray, the
+Anywhere window or the desktop app and the other two follow, because they share
+`%APPDATA%\ReadAloud\settings.json`.
 
 Start it automatically at login — double-click **`Add to Startup.bat`**, or:
 
@@ -129,6 +150,7 @@ The right-click menu also has:
 - **Read from here to the end of the page** — start at your selection, keep going
 - **Read this page aloud** — skips nav, headers, footers and sidebars
 - **Reading speed** → Slow / Normal / Fast / Faster
+- **Volume** → Mute / 25% / 50% / 75% / 100%
 - **Stop reading**
 
 | Shortcut | Action |
@@ -198,7 +220,7 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet     # no sound, no
 powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DOM suite
 ```
 
-72 tests across six suites:
+88 tests across six suites:
 
 | Suite | Tests | What it covers |
 |---|---|---|
@@ -206,7 +228,7 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DO
 | `parity` | 5 | The Python and JavaScript chunkers produce identical sentences |
 | `engine` | 11 | Live round trip against the PowerShell SAPI server, including WAV output |
 | `app` | 16 | Drives the real Tk window: playback, highlighting, seeking, settings |
-| `global` | 11 | Registers real system hotkeys, clipboard capture and restore |
+| `global` | 27 | Real system hotkeys and tray icon, menu commands, clipboard capture |
 | `dom` | 18 | Extension text extraction, DOM range mapping and highlighting, in Chrome |
 
 The `engine`, `app` and `global` suites make sound (at low volume) and briefly
@@ -224,7 +246,8 @@ pass/fail inline and leaves the results in `window.__testResults`.
 ```
 app/
   tts_app.py         desktop window
-  global_reader.py   OS-wide hotkeys
+  global_reader.py   OS-wide hotkeys and tray-menu handling
+  tray.py            Win32 tray icon, popup menu and hotkey registration
   speech_engine.py   talks to the PowerShell server over stdin/stdout
   speech_server.ps1  the SAPI process: speak, pause, stop, save WAV
   chunker.py         text -> sentences (with offsets, for highlighting)
@@ -247,6 +270,13 @@ Python talks to SAPI through a long-lived PowerShell process using a small
 line-based protocol. Text is base64-encoded on the way across, so newlines,
 pipes and non-ASCII survive intact.
 
+The tray icon and the global hotkeys share one Win32 thread. They have to:
+`RegisterHotKey` delivers `WM_HOTKEY` to whichever thread registered it, and a
+tray icon needs a window with a message loop — so one loop serves both. Tk never
+touches Win32; it reads events off a queue and pushes a state snapshot back, so
+the menu can show the current voice, speed and volume without either thread
+reaching into the other's objects.
+
 Both the app and the extension split text into sentences before speaking. That
 buys three things: highlighting has something to point at, seeking has somewhere
 to jump to, and stopping is immediate instead of waiting out a long utterance.
@@ -264,8 +294,12 @@ code units — and each is checked against its own runtime.
 dropdown. Then run `python app\tts_app.py` from a terminal to see any error.
 
 **`Ctrl+Alt+R` does nothing.** Another program may already own that combination —
-the window shows which hotkeys failed to register. Also check the target app is
-not running as administrator.
+the window shows which hotkeys failed to register. A second copy of Read Aloud
+Anywhere already running will do that too, so check the tray first. Also check
+the target app is not running as administrator.
+
+**No W icon by the clock.** Windows 11 hides new tray icons: click the `^` next
+to the clock and drag the W out onto the taskbar.
 
 **The extension's right-click entry is missing.** Reload the extension at
 `chrome://extensions`, then reload the page. Content scripts are not injected

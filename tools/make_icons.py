@@ -1,7 +1,8 @@
-"""Generate the app/extension icons — a speaker glyph on a rounded indigo tile.
+"""Generate the icons — a speaker glyph and a Watson "W" monogram.
 
 Pure standard library (zlib + struct), so there is no Pillow dependency. Writes
-PNGs for the Chrome extension and a multi-size .ico for the desktop window.
+PNGs for the Chrome extension, a multi-size .ico for the desktop window, and a
+second .ico with the W monogram for the system tray.
 
     python tools/make_icons.py
 """
@@ -15,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PNG_DIR = ROOT / "extension" / "icons"
 ICO_PATH = ROOT / "app" / "readaloud.ico"
+W_ICO_PATH = ROOT / "app" / "watson.ico"
 
 PNG_SIZES = (16, 32, 48, 128)
 ICO_SIZES = (16, 32, 48, 64, 128, 256)
@@ -62,16 +64,44 @@ def _in_waves(x: float, y: float) -> bool:
     return (0.135 <= dist <= 0.175) or (0.225 <= dist <= 0.265)
 
 
-def _sample(x: float, y: float):
+def _dist_to_segment(px, py, ax, ay, bx, by) -> float:
+    dx, dy = bx - ax, by - ay
+    length = dx * dx + dy * dy
+    t = 0.0 if length == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length))
+    cx, cy = ax + t * dx, ay + t * dy
+    return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+
+
+# The W as four thick strokes, drawn a touch asymmetrically so the middle peak
+# reads as a peak rather than a spike.
+W_STROKE = 0.062
+W_POINTS = [
+    (0.215, 0.305),
+    (0.360, 0.715),
+    (0.500, 0.455),
+    (0.640, 0.715),
+    (0.785, 0.305),
+]
+
+
+def _in_w(x: float, y: float) -> bool:
+    for (ax, ay), (bx, by) in zip(W_POINTS, W_POINTS[1:]):
+        if _dist_to_segment(x, y, ax, ay, bx, by) <= W_STROKE:
+            return True
+    return False
+
+
+def _sample(x: float, y: float, glyph=None):
     """Return an RGBA pixel for a point in the unit square."""
     if not _in_rounded_square(x, y):
         return (0, 0, 0, 0)
-    if _in_speaker(x, y) or _in_waves(x, y):
+    hit = _in_w(x, y) if glyph == "w" else (_in_speaker(x, y) or _in_waves(x, y))
+    if hit:
         return (*GLYPH, 255)
     return (*_lerp(BG_TOP, BG_BOTTOM, y), 255)
 
 
-def render(size: int) -> list[list[tuple[int, int, int, int]]]:
+def render(size: int, glyph=None) -> list[list[tuple[int, int, int, int]]]:
     """Supersampled render, so edges and arcs stay smooth at 16px."""
     rows = []
     step = 1.0 / (size * SUPERSAMPLE)
@@ -83,7 +113,7 @@ def render(size: int) -> list[list[tuple[int, int, int, int]]]:
                 for sx in range(SUPERSAMPLE):
                     x = (px * SUPERSAMPLE + sx + 0.5) * step
                     y = (py * SUPERSAMPLE + sy + 0.5) * step
-                    pr, pg, pb, pa = _sample(x, y)
+                    pr, pg, pb, pa = _sample(x, y, glyph)
                     # Weight colour by coverage so transparent samples do not
                     # darken the edge.
                     r += pr * pa
@@ -144,18 +174,29 @@ def main() -> None:
     PNG_DIR.mkdir(parents=True, exist_ok=True)
     ICO_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    cache: dict[int, bytes] = {}
+    speaker: dict[int, bytes] = {}
     for size in sorted(set(PNG_SIZES) | set(ICO_SIZES)):
-        cache[size] = to_png(render(size))
+        speaker[size] = to_png(render(size))
 
     for size in PNG_SIZES:
         path = PNG_DIR / f"icon{size}.png"
-        path.write_bytes(cache[size])
-        print(f"wrote {path.relative_to(ROOT)} ({len(cache[size]):,} bytes)")
+        path.write_bytes(speaker[size])
+        print(f"wrote {path.relative_to(ROOT)} ({len(speaker[size]):,} bytes)")
 
-    ico = to_ico({s: cache[s] for s in ICO_SIZES})
+    ico = to_ico({s: speaker[s] for s in ICO_SIZES})
     ICO_PATH.write_bytes(ico)
     print(f"wrote {ICO_PATH.relative_to(ROOT)} ({len(ico):,} bytes)")
+
+    # The tray wants the W monogram: at 16px it stays legible where the speaker
+    # glyph's arcs turn to mush.
+    watson = {size: to_png(render(size, glyph="w")) for size in ICO_SIZES}
+    w_ico = to_ico(watson)
+    W_ICO_PATH.write_bytes(w_ico)
+    print(f"wrote {W_ICO_PATH.relative_to(ROOT)} ({len(w_ico):,} bytes)")
+
+    preview = PNG_DIR.parent.parent / "app" / "watson128.png"
+    preview.write_bytes(watson[128])
+    print(f"wrote {preview.relative_to(ROOT)} ({len(watson[128]):,} bytes)")
 
 
 if __name__ == "__main__":

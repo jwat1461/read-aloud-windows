@@ -285,9 +285,17 @@ const SPEEDS = [
   ["speed-faster", "Faster", 2.0],
 ];
 
+const VOLUMES = [
+  ["volume-mute", "Mute", 0],
+  ["volume-25", "25%", 0.25],
+  ["volume-50", "50%", 0.5],
+  ["volume-75", "75%", 0.75],
+  ["volume-100", "100%", 1.0],
+];
+
 async function buildMenus() {
   await chrome.contextMenus.removeAll();
-  const { rate } = await getSettings();
+  const { rate, volume } = await getSettings();
 
   chrome.contextMenus.create({
     id: "read-selection",
@@ -331,6 +339,22 @@ async function buildMenus() {
       contexts: ["page", "selection"],
     });
   }
+
+  chrome.contextMenus.create({
+    id: "volume",
+    title: "Volume",
+    contexts: ["page", "selection"],
+  });
+  for (const [id, label, value] of VOLUMES) {
+    chrome.contextMenus.create({
+      id,
+      parentId: "volume",
+      title: label,
+      type: "radio",
+      checked: Math.abs(volume - value) < 0.01,
+      contexts: ["page", "selection"],
+    });
+  }
 }
 
 chrome.runtime.onInstalled.addListener(buildMenus);
@@ -353,6 +377,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       const speed = SPEEDS.find(([id]) => id === info.menuItemId);
       if (speed) {
         await chrome.storage.sync.set({ rate: speed[2] });
+        applySettingsNow();
+        return;
+      }
+      const level = VOLUMES.find(([id]) => id === info.menuItemId);
+      if (level) {
+        await chrome.storage.sync.set({ volume: level[2] });
         applySettingsNow();
       }
     }

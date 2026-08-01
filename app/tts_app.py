@@ -701,6 +701,11 @@ class ReadAloudApp(tk.Tk):
             self.engine.shutdown()
         except Exception:
             pass
+        # Variable.__del__ calls back into Tcl; left to the garbage collector it
+        # runs after destroy() and Python prints an ignored RuntimeError.
+        for name in ("voice_var", "rate_var", "volume_var", "status_var", "count_var"):
+            if hasattr(self, name):
+                delattr(self, name)
         self.destroy()
 
 
