@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Read Aloud — DOM mapping tests</title>
+    <link rel="stylesheet" href="../content.css" />
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #15171d;
+        color: #e6e8ef;
+        font: 14px/1.6 "Segoe UI", system-ui, sans-serif;
+      }
+      #fixture {
+        max-width: 640px;
+        padding: 16px;
+        border: 1px solid #2b2f3a;
+        border-radius: 8px;
+        background: #0f1116;
+      }
+      #results {
+        margin-top: 20px;
+        font: 13px/1.5 ui-monospace, Consolas, monospace;
+        white-space: pre-wrap;
+      }
+      .pass { color: #6ee7a8; }
+      .fail { color: #ff8080; }
+      #summary { margin-top: 14px; font-size: 15px; font-weight: 600; }
+      .hidden-block { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>DOM mapping tests</h1>
+
+    <!-- The document under test. Deliberately messy: inline elements, nested
+         blocks, hidden content, script/style noise, emoji and a table. -->
+    <div id="fixture">
+      <p>The first paragraph is plain. It has two sentences.</p>
+      <p>
+        A paragraph with <b>bold</b> and <i>italic</i> and a
+        <a href="#">link</a> inside it.
+      </p>
+      <div class="hidden-block">Never read this hidden text.</div>
+      <script>
+        var shouldNotBeRead = "script contents";
+      </script>
+      <style>
+        .noise { color: red; }
+      </style>
+      <ul>
+        <li>First list item.</li>
+        <li>Second list item.</li>
+      </ul>
+      <blockquote>A quoted sentence with emoji 🔊 inside it.</blockquote>
+      <table>
+        <tr><td>Cell one.</td><td>Cell two.</td></tr>
+      </table>
+      <p>Final paragraph here.</p>
+    </div>
+
+    <div id="results"></div>
+    <div id="summary"></div>
+
+    <script>
+      // Minimal stand-in for the extension APIs content.js touches at load time.
+      window.chrome = {
+        runtime: {
+          sendMessage: (msg) => {
+            window.__sent = window.__sent || [];
+            window.__sent.push(msg);
+            return Promise.resolve();
+          },
+          onMessage: { addListener() {} },
+        },
+        storage: {
+          sync: { get: (_d, cb) => cb && cb({ bubble: true }) },
+          onChanged: { addListener() {} },
+        },
+      };
+    </script>
+    <script src="../chunker.js"></script>
+    <script src="../content.js"></script>
+    <script src="run_tests.js"></script>
+  </body>
+</html>

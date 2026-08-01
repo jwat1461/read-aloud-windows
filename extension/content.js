@@ -95,6 +95,8 @@
 
   /** Binary search: global offset -> the text node and offset within it. */
   function locate(pieces, offset) {
+    if (pieces.length === 0) return null;
+
     let lo = 0;
     let hi = pieces.length - 1;
     while (lo <= hi) {
@@ -104,9 +106,15 @@
       else if (offset > piece.end) lo = mid + 1;
       else return { node: piece.node, offset: offset - piece.start };
     }
-    const last = pieces[pieces.length - 1];
-    if (!last) return null;
-    return { node: last.node, offset: last.node.nodeValue.length };
+
+    // The offset fell in one of the "\n\n" separators inserted between blocks,
+    // which belong to no text node. Clamp to the nearest real one rather than
+    // jumping to the end of the document.
+    const piece = pieces[Math.max(0, Math.min(pieces.length - 1, hi))];
+    return {
+      node: piece.node,
+      offset: Math.max(0, Math.min(offset - piece.start, piece.node.nodeValue.length)),
+    };
   }
 
   function makeRange(pieces, start, end) {
@@ -191,6 +199,7 @@
   }
 
   function readSelection({ toEnd = false } = {}) {
+    hideBubble();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || !selection.toString().trim()) {
       chrome.runtime.sendMessage({ type: "noText" });
@@ -219,7 +228,6 @@
       return;
     }
 
-    hideBubble();
     read(from, to, toEnd ? "rest of page" : "selection");
   }
 
@@ -355,4 +363,17 @@
   });
 
   window.addEventListener("pagehide", clearHighlight);
+
+  // Exposed for test/harness.html. Content scripts run in an isolated world, so
+  // this is invisible to the pages the extension runs on.
+  window.__readAloudInternals = {
+    buildMap,
+    locate,
+    makeRange,
+    blockAncestor,
+    setMap: (m) => (map = m),
+    getMap: () => map,
+    offsetOf,
+    supportsHighlight,
+  };
 })();

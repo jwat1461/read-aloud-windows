@@ -194,21 +194,28 @@ more voices than the desktop app for that reason — Chrome talks to both.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File run_tests.ps1
-powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet   # no sound, no windows
+powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet     # no sound, no windows
+powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DOM suite
 ```
 
-54 tests across five suites:
+72 tests across six suites:
 
-| Suite | What it covers |
-|---|---|
-| `chunker` | Sentence splitting: punctuation, paragraphs, long runs, unicode |
-| `parity` | The Python and JavaScript chunkers produce identical sentences |
-| `engine` | Live round trip against the PowerShell SAPI server, including WAV output |
-| `app` | Drives the real Tk window: playback, highlighting, seeking, settings |
-| `global` | Registers real system hotkeys, clipboard capture and restore |
+| Suite | Tests | What it covers |
+|---|---|---|
+| `chunker` | 11 | Sentence splitting: punctuation, paragraphs, long runs, unicode |
+| `parity` | 5 | The Python and JavaScript chunkers produce identical sentences |
+| `engine` | 11 | Live round trip against the PowerShell SAPI server, including WAV output |
+| `app` | 16 | Drives the real Tk window: playback, highlighting, seeking, settings |
+| `global` | 11 | Registers real system hotkeys, clipboard capture and restore |
+| `dom` | 18 | Extension text extraction, DOM range mapping and highlighting, in Chrome |
 
 The `engine`, `app` and `global` suites make sound (at low volume) and briefly
 open windows, because they exercise the real speech engine rather than a mock.
+
+The `dom` suite runs in a browser, because flattening a real document and
+mapping sentences back onto DOM ranges is exactly what a mock would not test.
+`-Browser` serves `extension\` and opens `test\harness.html`; the page reports
+pass/fail inline and leaves the results in `window.__testResults`.
 
 ---
 

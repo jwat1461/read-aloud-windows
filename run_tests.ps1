@@ -12,16 +12,47 @@
 
     Speech during the tests plays at low volume.
 
+    A sixth suite covers the extension's DOM mapping and needs a real browser.
+    Run it with -Browser, which serves the extension folder and opens the
+    harness in your default browser; results render on the page.
+
 .PARAMETER Quiet
     Only run the suites that make no sound and open no windows.
+
+.PARAMETER Browser
+    Serve and open the extension DOM test harness instead of the other suites.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File run_tests.ps1
     powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet
+    powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser
 #>
 
 [CmdletBinding()]
-param([switch]$Quiet)
+param([switch]$Quiet, [switch]$Browser)
+
+if ($Browser) {
+    $port = 8777
+    $url = "http://127.0.0.1:$port/test/harness.html"
+    Write-Host "Serving extension\ on port $port" -ForegroundColor Cyan
+    Write-Host "Opening $url" -ForegroundColor Cyan
+    Write-Host 'Results render on the page. Press Ctrl+C here when done.'
+    Write-Host ''
+
+    $server = Start-Process -PassThru -WindowStyle Hidden python `
+        -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1' `
+        -WorkingDirectory (Join-Path $PSScriptRoot 'extension')
+    try {
+        Start-Sleep -Milliseconds 700
+        Start-Process $url
+        Write-Host 'Press Enter to stop the server...' -NoNewline
+        [void][Console]::ReadLine()
+    }
+    finally {
+        if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+    }
+    return
+}
 
 $ErrorActionPreference = 'Continue'
 $root = $PSScriptRoot

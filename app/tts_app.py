@@ -484,6 +484,8 @@ class ReadAloudApp(tk.Tk):
         )
 
     def read(self) -> None:
+        if self._closing:
+            return  # autoplay timer can outlive a window closed straight away
         if self.state_name == "paused":
             self.toggle_pause()
             return

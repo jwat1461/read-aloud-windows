@@ -14,8 +14,14 @@
   }
 }
 
+/* The bubble's own styles live inside its shadow root; the host only needs to
+   be positioned. (No `all: initial` here — it would reset the two properties
+   above and drop the bubble back into the page flow.) */
 #read-aloud-bubble-host {
   position: absolute;
   z-index: 2147483647;
-  all: initial;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
 }

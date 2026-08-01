@@ -29,6 +29,7 @@ const state = {
   paused: false,
   chunks: [],
   index: 0,
+  errors: 0,
   tabId: null,
   frameId: null,
   scope: "",
@@ -116,10 +117,16 @@ async function startReading({ chunks, scope, tabId, frameId }) {
   chrome.tts.stop();
 
   // Tell the previous frame to drop its highlight before we retarget.
-  if (state.tabId !== null && state.tabId !== tabId) toFrame({ type: "clearHighlight" });
+  if (
+    state.tabId !== null &&
+    (state.tabId !== tabId || state.frameId !== frameId)
+  ) {
+    toFrame({ type: "clearHighlight" });
+  }
 
   state.chunks = chunks;
   state.index = 0;
+  state.errors = 0;
   state.playing = true;
   state.paused = false;
   state.tabId = tabId ?? null;
@@ -147,9 +154,21 @@ async function speakCurrent() {
     enqueue: false,
     onEvent(event) {
       if (myGeneration !== generation) return; // stale utterance
-      if (event.type === "end" || event.type === "error") {
+      if (event.type === "end") {
+        state.errors = 0;
         clearWatchdog();
         advance();
+      } else if (event.type === "error") {
+        // A stored voice that no longer exists fails on every sentence. Without
+        // this guard the whole document would be skipped in a fraction of a
+        // second, looking like nothing happened at all.
+        clearWatchdog();
+        if (++state.errors >= 3) {
+          notifyUnavailable();
+          finish();
+        } else {
+          advance();
+        }
       }
     },
   };
