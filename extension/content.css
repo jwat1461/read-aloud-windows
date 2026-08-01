@@ -1,0 +1,21 @@
+/* The sentence currently being spoken.
+   ::highlight() paints a Range without inserting elements, so page scripts and
+   frameworks never see a DOM change. */
+::highlight(readaloud-sentence) {
+  background-color: #ffd84d;
+  color: #10131a;
+  text-shadow: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  ::highlight(readaloud-sentence) {
+    background-color: #f6c445;
+    color: #10131a;
+  }
+}
+
+#read-aloud-bubble-host {
+  position: absolute;
+  z-index: 2147483647;
+  all: initial;
+}

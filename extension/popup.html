@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Read Aloud</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Read Aloud</h1>
+      <span id="status" class="status">Ready</span>
+    </header>
+
+    <div class="page-actions">
+      <button id="read-selection" class="ghost">Read highlighted text</button>
+      <button id="read-page" class="ghost">Read whole page</button>
+    </div>
+
+    <textarea
+      id="text"
+      placeholder="Paste text here, then press Read…"
+      spellcheck="false"
+    ></textarea>
+
+    <div class="transport">
+      <button id="read" class="primary">▶&nbsp; Read</button>
+      <button id="pause" disabled>❚❚&nbsp; Pause</button>
+      <button id="stop" disabled>■&nbsp; Stop</button>
+    </div>
+
+    <div class="progress-wrap"><div id="progress" class="progress"></div></div>
+
+    <section class="settings">
+      <label class="row">
+        <span>Voice</span>
+        <select id="voice"></select>
+      </label>
+
+      <label class="row">
+        <span>Speed <b id="rate-value">1.0×</b></span>
+        <input id="rate" type="range" min="0.5" max="3" step="0.1" value="1" />
+      </label>
+
+      <label class="row">
+        <span>Pitch <b id="pitch-value">1.0</b></span>
+        <input id="pitch" type="range" min="0" max="2" step="0.1" value="1" />
+      </label>
+
+      <label class="row">
+        <span>Volume <b id="volume-value">100</b></span>
+        <input id="volume" type="range" min="0" max="1" step="0.05" value="1" />
+      </label>
+
+      <label class="check">
+        <input id="bubble" type="checkbox" checked />
+        <span>Show a Read button when I highlight text</span>
+      </label>
+    </section>
+
+    <footer>
+      <span>Right-click any highlighted text → <b>Read aloud</b></span>
+      <span class="keys">Alt+Shift+R read · Alt+Shift+P pause · Alt+Shift+S stop</span>
+    </footer>
+
+    <script src="chunker.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

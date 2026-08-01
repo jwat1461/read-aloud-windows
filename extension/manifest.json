@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Read Aloud — Highlight & Speak",
+  "version": "1.0.0",
+  "description": "Highlight text on any page and hear it read out loud, or paste text into the popup. Adjustable voice, speed and pitch.",
+  "permissions": ["tts", "contextMenus", "storage", "scripting"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Read Aloud",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["chunker.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "commands": {
+    "read-selection": {
+      "suggested_key": { "default": "Alt+Shift+R" },
+      "description": "Read the highlighted text aloud"
+    },
+    "toggle-pause": {
+      "suggested_key": { "default": "Alt+Shift+P" },
+      "description": "Pause or resume reading"
+    },
+    "stop-reading": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Stop reading"
+    }
+  }
+}
