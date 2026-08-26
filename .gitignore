@@ -16,3 +16,11 @@ venv/
 # Windows
 Thumbs.db
 desktop.ini
+
+# Chrome extension build output
+extension.crx
+
+# Signing keys. The .pem owns the extension ID — anyone holding it can ship
+# updates as you — so it never goes in a commit, public repo or not.
+extension.pem
+*.pem
