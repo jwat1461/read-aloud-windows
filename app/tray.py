@@ -2,7 +2,9 @@
 
 Both live on one dedicated Win32 thread, because they have to: RegisterHotKey
 delivers WM_HOTKEY to the thread that registered it, and a tray icon needs a
-window with a message loop. One loop serves both.
+window with a message loop. One loop serves both — and, since the window is
+already there, it also carries the clipboard-format listener that drives
+auto-read, so nothing has to poll the clipboard.
 
 The Tk side never touches Win32. It reads events off a queue and pushes a state
 snapshot back down, so the menu can show the current voice, speed and volume
@@ -32,13 +34,16 @@ WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
 WM_CONTEXTMENU = 0x007B
+WM_CLIPBOARDUPDATE = 0x031D
 
 WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
 WM_REFRESH_TIP = WM_APP + 2
+WM_BALLOON = WM_APP + 3
 
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
-NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x01, 0x02, 0x04
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x01, 0x02, 0x04, 0x10
+NIIF_INFO, NIIF_WARNING = 0x01, 0x02
 
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x0010
@@ -72,6 +77,8 @@ CMD_READ_SELECTION = 3
 CMD_PAUSE = 4
 CMD_STOP = 5
 CMD_QUIT = 6
+CMD_AUTO_READ = 7
+CMD_NEXT = 8
 CMD_VOICE_BASE = 1000
 CMD_RATE_BASE = 2000
 CMD_VOLUME_BASE = 3000
@@ -171,10 +178,21 @@ user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetMessageW.argtypes = [
     ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT
 ]
+user32.AddClipboardFormatListener.restype = wintypes.BOOL
+user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
+user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
+user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
+user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+user32.GetClipboardSequenceNumber.argtypes = []
 shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
+
+def clipboard_sequence() -> int:
+    """Bumps on every clipboard change in the session, our own writes included."""
+    return int(user32.GetClipboardSequenceNumber())
 
 
 class TrayBackend(threading.Thread):
@@ -196,11 +214,13 @@ class TrayBackend(threading.Thread):
         self.ready = threading.Event()
         self.failed_hotkeys: list[str] = []
         self.tray_ok = False
+        self.clipboard_listener_ok = False
 
         self._thread_id: int | None = None
         self._hwnd = None
         self._hicon = None
         self._nid = None
+        self._balloon: tuple | None = None
         self._lock = threading.Lock()
         self._snapshot: dict = {
             "voices": [],
@@ -209,6 +229,9 @@ class TrayBackend(threading.Thread):
             "volume": 100,
             "state": "idle",
             "status": "",
+            "auto_read": False,
+            "queued": 0,
+            "queue_dropped": False,
         }
         # WNDPROC must outlive the window or Windows calls into freed memory.
         self._wndproc = WNDPROC(self._on_message)
@@ -224,6 +247,15 @@ class TrayBackend(threading.Thread):
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._snapshot)
+
+    def notify(self, title: str, message: str, warning: bool = False) -> bool:
+        """Pop a balloon by the clock. False if there is no icon to hang it on."""
+        if not self._hwnd or not self.tray_ok:
+            return False
+        with self._lock:
+            # szInfoTitle is 64 wide chars, szInfo 256, terminators included.
+            self._balloon = (title[:63], message[:255], warning)
+        return bool(user32.PostMessageW(self._hwnd, WM_BALLOON, 0, 0))
 
     def stop(self, timeout: float = 3.0) -> None:
         """Ask the loop to exit and wait for it.
@@ -258,9 +290,21 @@ class TrayBackend(threading.Thread):
         )
         user32.AppendMenuW(
             menu,
+            MF_STRING | (MF_CHECKED if snap.get("auto_read") else 0),
+            CMD_AUTO_READ,
+            "Auto-read clipboard\tCtrl+Alt+A",
+        )
+        user32.AppendMenuW(
+            menu,
             MF_STRING | (0 if reading else MF_GRAYED),
             CMD_PAUSE,
             ("Resume\tCtrl+Alt+P" if state == "paused" else "Pause\tCtrl+Alt+P"),
+        )
+        user32.AppendMenuW(
+            menu,
+            MF_STRING | (0 if reading else MF_GRAYED),
+            CMD_NEXT,
+            "Skip to next\tCtrl+Alt+N",
         )
         user32.AppendMenuW(
             menu,
@@ -334,8 +378,23 @@ class TrayBackend(threading.Thread):
                 self.events.put(("menu", CMD_SHOW))
             return 0
 
+        if message == WM_CLIPBOARDUPDATE:
+            # With auto-read off there is nothing to say, and every copy anyone
+            # makes would otherwise cross to the Tk thread for nothing. The
+            # sequence number is read here, on the thread the message arrived
+            # on, so the Tk side can tell our own writes from everybody else's.
+            with self._lock:
+                wanted = bool(self._snapshot.get("auto_read"))
+            if wanted:
+                self.events.put(("clipboard", clipboard_sequence()))
+            return 0
+
         if message == WM_REFRESH_TIP:
             self._update_tooltip()
+            return 0
+
+        if message == WM_BALLOON:
+            self._show_balloon()
             return 0
 
         if message == WM_CLOSE:
@@ -351,16 +410,38 @@ class TrayBackend(threading.Thread):
 
     # ------------------------------------------------------------- tray icon
 
-    def _tooltip_text(self) -> str:
+    def tooltip_text(self) -> str:
         snap = self.snapshot()
+        auto = "Auto-read: " + ("on" if snap.get("auto_read") else "off")
+        queued = int(snap.get("queued") or 0)
+        if queued:
+            auto += f" · {queued} queued"
+            if snap.get("queue_dropped"):
+                auto += " · oldest dropped"
+
+        lines = [self.base_tooltip, auto]
         status = snap.get("status") or ""
-        text = f"{self.base_tooltip}\n{status}" if status else self.base_tooltip
-        return text[:127]  # szTip is 128 wide chars including the terminator
+        if status:
+            lines.append(status)
+        # szTip is 128 wide chars including the terminator.
+        return "\n".join(lines)[:127]
+
+    def _show_balloon(self) -> None:
+        with self._lock:
+            balloon, self._balloon = self._balloon, None
+        if not self._nid or not balloon:
+            return
+        title, text, warning = balloon
+        self._nid.szInfoTitle = title
+        self._nid.szInfo = text
+        self._nid.dwInfoFlags = NIIF_WARNING if warning else NIIF_INFO
+        self._nid.uFlags = NIF_INFO
+        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
 
     def _update_tooltip(self) -> None:
         if not self._nid:
             return
-        self._nid.szTip = self._tooltip_text()
+        self._nid.szTip = self.tooltip_text()
         self._nid.uFlags = NIF_TIP
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
 
@@ -383,7 +464,7 @@ class TrayBackend(threading.Thread):
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
         nid.hIcon = hicon
-        nid.szTip = self._tooltip_text()
+        nid.szTip = self.tooltip_text()
         self._nid = nid
 
         return bool(shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)))
@@ -417,6 +498,9 @@ class TrayBackend(threading.Thread):
 
         if self._hwnd:
             self.tray_ok = self._add_icon()
+            self.clipboard_listener_ok = bool(
+                user32.AddClipboardFormatListener(self._hwnd)
+            )
 
         registered = []
         for hotkey_id, (mods, vk, label, _desc) in self.hotkeys.items():
@@ -437,6 +521,9 @@ class TrayBackend(threading.Thread):
 
         for hotkey_id in registered:
             user32.UnregisterHotKey(None, hotkey_id)
+        if self.clipboard_listener_ok and self._hwnd:
+            user32.RemoveClipboardFormatListener(self._hwnd)
+            self.clipboard_listener_ok = False
         self._remove_icon()
         if self._hwnd:
             user32.DestroyWindow(self._hwnd)

@@ -5,8 +5,14 @@ voice, speed and volume, or to stop whatever is being read.
 
     Ctrl+Alt+R   read the selected text — press again to stop
     Ctrl+Alt+C   read whatever is on the clipboard
+    Ctrl+Alt+A   auto-read the clipboard, on / off
+    Ctrl+Alt+N   skip to the next queued item
     Ctrl+Alt+P   pause / resume
     Ctrl+Alt+S   stop
+
+With auto-read on, anything that lands on the clipboard is queued and read in
+copy order. Content a password manager has marked private is skipped without
+ever being looked at.
 
 There is no OS call that hands you another application's selection, so the trick
 every tool of this kind uses is to synthesise a Ctrl+C into the focused window
@@ -20,6 +26,7 @@ from __future__ import annotations
 import ctypes
 import queue
 import sys
+import time
 import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
@@ -31,6 +38,7 @@ from chunker import chunks
 from speech_engine import SpeechEngine, SpeechError
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 # --------------------------------------------------------------- key injection
 
@@ -50,12 +58,16 @@ HOTKEY_READ = 1
 HOTKEY_CLIPBOARD = 2
 HOTKEY_PAUSE = 3
 HOTKEY_STOP = 4
+HOTKEY_AUTO_READ = 5
+HOTKEY_NEXT = 6
 
 _MODS = tray.MOD_CONTROL | tray.MOD_ALT | tray.MOD_NOREPEAT
 
 HOTKEYS = {
     HOTKEY_READ: (_MODS, ord("R"), "Ctrl+Alt+R", "Read selection / stop"),
     HOTKEY_CLIPBOARD: (_MODS, ord("C"), "Ctrl+Alt+C", "Read clipboard"),
+    HOTKEY_AUTO_READ: (_MODS, ord("A"), "Ctrl+Alt+A", "Auto-read clipboard on/off"),
+    HOTKEY_NEXT: (_MODS, ord("N"), "Ctrl+Alt+N", "Skip to next queued"),
     HOTKEY_PAUSE: (_MODS, ord("P"), "Ctrl+Alt+P", "Pause / resume"),
     HOTKEY_STOP: (_MODS, ord("S"), "Ctrl+Alt+S", "Stop"),
 }
@@ -75,13 +87,130 @@ def send_copy() -> None:
     for vk in (VK_MENU, VK_LMENU, VK_RMENU, VK_SHIFT, VK_LSHIFT, VK_RSHIFT,
                VK_LWIN, VK_RWIN):
         _key(vk, up=True)
-    for vk in (ord("R"), ord("C"), ord("P"), ord("S")):
+    for _mods, vk, _label, _desc in HOTKEYS.values():
         _key(vk, up=True)
 
     _key(VK_CONTROL)
     _key(ord("C"))
     _key(ord("C"), up=True)
     _key(VK_CONTROL, up=True)
+
+
+# ------------------------------------------------------------ single instance
+
+# Per-session, so a second signed-in user gets their own copy.
+SINGLE_INSTANCE_MUTEX = "Local\\ReadAloudAnywhere.SingleInstance"
+ERROR_ALREADY_EXISTS = 183
+BALLOON_LINGER_S = 4.0
+
+kernel32.CreateMutexW.restype = wintypes.HANDLE
+kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+
+def claim_single_instance() -> tuple[int, bool]:
+    """Return (handle, someone_got_here_first).
+
+    Two copies would fight over the hotkeys: RegisterHotKey is first come,
+    first served, so the second one silently loses every shortcut.
+    """
+    ctypes.set_last_error(0)
+    handle = kernel32.CreateMutexW(None, True, SINGLE_INSTANCE_MUTEX)
+    return handle, ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+
+
+def release_single_instance(handle) -> None:
+    if not handle:
+        return
+    kernel32.ReleaseMutex(handle)
+    kernel32.CloseHandle(handle)
+
+
+def warn_already_running() -> None:
+    """Say so by the clock, then go. A balloon needs an icon to hang on, and the
+    icon has to outlive the message, so this copy lingers a few seconds."""
+    print("Read Aloud Anywhere is already running.")
+    events: queue.Queue = queue.Queue()
+    backend = tray.TrayBackend(
+        events,
+        Path(__file__).with_name("watson.ico"),
+        {},
+        tooltip="Read Aloud Anywhere",
+    )
+    backend.start()
+    backend.ready.wait(timeout=5)
+    if backend.notify(
+        "Read Aloud Anywhere", "Read Aloud Anywhere is already running."
+    ):
+        time.sleep(BALLOON_LINGER_S)
+    backend.stop()
+
+
+# -------------------------------------------------------- clipboard formats
+
+CF_UNICODETEXT = 13
+
+user32.RegisterClipboardFormatW.restype = wintypes.UINT
+user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.GetClipboardData.argtypes = [wintypes.UINT]
+kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalSize.restype = ctypes.c_size_t
+kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+
+# Password managers put these on the clipboard to tell anything watching —
+# clipboard history, cloud sync, us — to leave the content alone.
+CF_EXCLUDE_MONITOR = user32.RegisterClipboardFormatW(
+    "ExcludeClipboardContentFromMonitorProcessing"
+)
+CF_CLIPBOARD_HISTORY = user32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+
+
+def clipboard_has_text() -> bool:
+    """False for files, images and rich-only formats, which we ignore silently."""
+    return bool(user32.IsClipboardFormatAvailable(CF_UNICODETEXT))
+
+
+def _clipboard_dword(fmt: int) -> int | None:
+    """Read a single-DWORD clipboard format, or None if it cannot be read."""
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(fmt)
+        if not handle or kernel32.GlobalSize(handle) < 4:
+            return None
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            return int(ctypes.cast(pointer, ctypes.POINTER(wintypes.DWORD))[0])
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def clipboard_is_private() -> bool:
+    """True when whoever wrote the clipboard asked monitors to keep off.
+
+    Asked before the text is fetched, so content marked this way is never read,
+    never spoken and never lands in a status line.
+    """
+    if user32.IsClipboardFormatAvailable(CF_EXCLUDE_MONITOR):
+        return True
+    if not user32.IsClipboardFormatAvailable(CF_CLIPBOARD_HISTORY):
+        return False
+    # Present but unreadable — someone else has the clipboard open — counts as
+    # private too. Staying quiet costs one read; guessing costs a password.
+    return _clipboard_dword(CF_CLIPBOARD_HISTORY) != 1
 
 
 # ------------------------------------------------------------------- the app
@@ -100,6 +229,20 @@ FONT_KEY = ("Cascadia Mono", 9)
 
 POLL_MS = 120
 CLIPBOARD_WAIT_MS = 700
+
+# Most apps fire two or three clipboard updates per copy; wait for the burst to
+# go quiet rather than reading the same thing three times.
+AUTO_READ_DEBOUNCE_MS = 150
+AUTO_READ_QUEUE_MAX = 20
+AUTO_READ_TAIL = "and more."
+
+
+def cap_text(text: str, limit: int) -> str:
+    """Trim a runaway copy and say so, rather than reading for an hour."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " " + AUTO_READ_TAIL
+
 
 SPEED_WORDS = [(-6, "very slow"), (-2, "slow"), (1, "normal"), (5, "fast"), (10, "very fast")]
 
@@ -131,11 +274,22 @@ class GlobalReader(tk.Tk):
         self.index = 0
         self.scope = ""
         self.awaiting_speak_ack = False
+        self._announcing = False
         self._closing = False
         self._tick_job: str | None = None
         self._restart_job: str | None = None
         self._restore_job: str | None = None
+        self._auto_job: str | None = None
         self._saved_clipboard: str | None = None
+
+        # Auto-read: a queue of clipboard texts waiting their turn, plus the
+        # bookkeeping that keeps our own clipboard writes out of it.
+        self.auto_queue: list[str] = []
+        self.queue_dropped = False
+        self._last_auto_read: str | None = None
+        self._own_clip_from: int | None = None
+        self._own_clip_to: int | None = None
+        self._paused_needs_restart = False
 
         self._build_ui()
 
@@ -159,16 +313,26 @@ class GlobalReader(tk.Tk):
         self.tray.ready.wait(timeout=5)
         self._push_snapshot()
 
-        if self.tray.failed_hotkeys:
-            self._set_status(
-                "Already in use by another app: " + ", ".join(self.tray.failed_hotkeys)
-            )
-        else:
-            self._set_status("Listening — select text anywhere and press Ctrl+Alt+R")
+        self._report_hotkey_failures()
 
         # Closing the window hides to the tray; Quit is how you actually exit.
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self._tick_job = self.after(POLL_MS, self._tick)
+
+    def _report_hotkey_failures(self) -> None:
+        """A shortcut that quietly does nothing is worse than no shortcut."""
+        if not self.tray.failed_hotkeys:
+            self._set_status("Listening — select text anywhere and press Ctrl+Alt+R")
+            return
+
+        combos = ", ".join(self.tray.failed_hotkeys)
+        self._set_status("Already in use by another app: " + combos)
+        self.tray.notify(
+            "Read Aloud Anywhere",
+            combos + " could not be registered — another app already owns "
+            "it. Those shortcuts will do nothing until it lets go.",
+            warning=True,
+        )
 
     # ------------------------------------------------------------------- ui
 
@@ -303,6 +467,9 @@ class GlobalReader(tk.Tk):
             volume=int(round(self.volume_var.get())),
             state=self.state_name,
             status=self.status_var.get(),
+            auto_read=bool(self.prefs["auto_read_clipboard"]),
+            queued=len(self.auto_queue),
+            queue_dropped=self.queue_dropped,
         )
 
     # -------------------------------------------------------------- settings
@@ -316,6 +483,7 @@ class GlobalReader(tk.Tk):
 
     def _do_restart(self) -> None:
         self._restart_job = None
+        self._announcing = False
         if self.state_name != "idle":
             self._speak_current()
 
@@ -375,8 +543,28 @@ class GlobalReader(tk.Tk):
         except tk.TclError:
             return ""
 
+    def _begin_own_clipboard(self) -> None:
+        """Open the window in which clipboard changes are ours, not the user's.
+
+        Ctrl+Alt+R clears the clipboard, synthesises a copy and puts the old
+        contents back — three changes, none of which auto-read may react to.
+        """
+        self._own_clip_from = tray.clipboard_sequence()
+        self._own_clip_to = None
+
+    def _end_own_clipboard(self) -> None:
+        self._own_clip_to = tray.clipboard_sequence()
+
+    def _is_own_clipboard(self, seq: int) -> bool:
+        if self._own_clip_from is None:
+            return False
+        if self._own_clip_to is None:
+            return True  # still mid copy-and-restore
+        return self._own_clip_from < seq <= self._own_clip_to
+
     def _capture_selection(self) -> None:
         """Copy the focused window's selection, then read it."""
+        self._begin_own_clipboard()
         self._saved_clipboard = self._read_clipboard()
         try:
             self.clipboard_clear()
@@ -410,15 +598,97 @@ class GlobalReader(tk.Tk):
 
     def _restore_clipboard(self) -> None:
         self._restore_job = None
-        if not self._saved_clipboard:
-            self._saved_clipboard = None
-            return
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(self._saved_clipboard)
-        except tk.TclError:
-            pass
+        if self._saved_clipboard:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(self._saved_clipboard)
+            except tk.TclError:
+                pass
         self._saved_clipboard = None
+        self._end_own_clipboard()
+
+    # -------------------------------------------------------------- auto-read
+
+    def _on_clipboard_update(self, seq: int) -> None:
+        """A WM_CLIPBOARDUPDATE reached us from the tray thread."""
+        if not self.prefs["auto_read_clipboard"]:
+            return
+        if self._is_own_clipboard(seq):
+            return
+        if self._auto_job is not None:
+            self.after_cancel(self._auto_job)
+        self._auto_job = self.after(AUTO_READ_DEBOUNCE_MS, self._auto_read_now)
+
+    def _auto_read_now(self) -> None:
+        self._auto_job = None
+        if not self.prefs["auto_read_clipboard"]:
+            return
+        if not clipboard_has_text() or clipboard_is_private():
+            return
+
+        text = self._read_clipboard()
+        if not text.strip() or text == self._last_auto_read:
+            return
+        self._last_auto_read = text
+        self._enqueue_auto_read(cap_text(text, self.prefs["auto_read_max_chars"]))
+
+    def _enqueue_auto_read(self, text: str) -> None:
+        """Join the back of the line — a new copy never barges in."""
+        self.auto_queue.append(text)
+        while len(self.auto_queue) > AUTO_READ_QUEUE_MAX:
+            self.auto_queue.pop(0)
+            self.queue_dropped = True
+
+        if self.state_name == "idle":
+            self._start_next_queued()
+            return
+
+        waiting = f"{len(self.auto_queue)} copied and waiting"
+        if self.queue_dropped:
+            waiting += " — oldest dropped"
+        self._set_status(waiting)
+
+    def _start_next_queued(self) -> bool:
+        if not self.auto_queue:
+            self.queue_dropped = False
+            return False
+        self.speak(self.auto_queue.pop(0), "clipboard")
+        return True
+
+    def toggle_auto_read(self) -> None:
+        """Ctrl+Alt+A. Anything already queued still gets read."""
+        on = not self.prefs["auto_read_clipboard"]
+        self.prefs["auto_read_clipboard"] = on
+        settings.save(self.prefs)
+        self._last_auto_read = None
+        self._announce("On" if on else "Off")
+        self._set_status(
+            "Auto-read is on — everything you copy will be read aloud"
+            if on
+            else "Auto-read is off"
+        )
+
+    def _announce(self, word: str) -> None:
+        """Say the new state in one word, so you know the toggle took.
+
+        SPEAK cancels whatever the engine is doing, so a read in progress is put
+        back through the usual re-read-this-sentence path. The queue is left be.
+        """
+        self.engine.speak(word)
+        if self.state_name == "speaking":
+            self._announcing = True
+            self._restart_sentence_soon()
+        elif self.state_name == "paused":
+            # The word cancelled a sentence nobody was hearing anyway; pick it
+            # up from the start on resume rather than skipping to the next.
+            self._paused_needs_restart = True
+
+    def skip_to_next(self) -> None:
+        """Ctrl+Alt+N — drop what is playing and start the next queued item."""
+        if self.state_name == "idle" and not self.auto_queue:
+            return
+        self.engine.stop()
+        self._finish()
 
     # -------------------------------------------------------------- playback
 
@@ -440,9 +710,10 @@ class GlobalReader(tk.Tk):
             return
         self.awaiting_speak_ack = True
         self.engine.speak(self.pieces[self.index])
-        self._set_status(
-            f"Reading {self.scope} — sentence {self.index + 1} of {len(self.pieces)}"
-        )
+        status = f"Reading {self.scope} — sentence {self.index + 1} of {len(self.pieces)}"
+        if self.auto_queue:
+            status += f" · {len(self.auto_queue)} queued"
+        self._set_status(status)
 
     def toggle_pause(self) -> None:
         if self.state_name == "speaking":
@@ -450,18 +721,28 @@ class GlobalReader(tk.Tk):
             self.state_name = "paused"
             self._set_status("Paused")
         elif self.state_name == "paused":
-            self.engine.resume()
             self.state_name = "speaking"
+            if self._paused_needs_restart:
+                self._paused_needs_restart = False
+                self._speak_current()
+            else:
+                self.engine.resume()
         else:
             return
         self._sync_buttons()
         self._push_snapshot()
 
     def stop(self) -> None:
+        """Ctrl+Alt+S. Empties the queue too — it is the only thing that does."""
+        emptied = bool(self.auto_queue)
+        self.auto_queue.clear()
+        self.queue_dropped = False
         if self.state_name == "idle":
+            if emptied:
+                self._set_status("Queue cleared")
             return
         self.engine.stop()
-        self._finish()
+        self._finish(advance=False)
         self._set_status("Stopped")
 
     def read_selection_or_stop(self) -> None:
@@ -471,15 +752,19 @@ class GlobalReader(tk.Tk):
         else:
             self._capture_selection()
 
-    def _finish(self) -> None:
+    def _finish(self, advance: bool = True) -> None:
         self.state_name = "idle"
         self.pieces = []
         self.index = 0
         self.awaiting_speak_ack = False
+        self._announcing = False
+        self._paused_needs_restart = False
         if self._restart_job is not None:
             self.after_cancel(self._restart_job)
             self._restart_job = None
         self._sync_buttons()
+        if advance and self._start_next_queued():
+            return
         self._set_status("Listening — Ctrl+Alt+R reads the selected text")
 
     # -------------------------------------------------------------- windowing
@@ -510,6 +795,10 @@ class GlobalReader(tk.Tk):
                 self.speak(text, "clipboard")
             else:
                 self._set_status("Clipboard is empty")
+        elif hotkey_id == HOTKEY_AUTO_READ:
+            self.toggle_auto_read()
+        elif hotkey_id == HOTKEY_NEXT:
+            self.skip_to_next()
         elif hotkey_id == HOTKEY_PAUSE:
             self.toggle_pause()
         elif hotkey_id == HOTKEY_STOP:
@@ -522,6 +811,10 @@ class GlobalReader(tk.Tk):
             self._capture_selection()
         elif command == tray.CMD_READ_CLIPBOARD:
             self._handle_hotkey(HOTKEY_CLIPBOARD)
+        elif command == tray.CMD_AUTO_READ:
+            self.toggle_auto_read()
+        elif command == tray.CMD_NEXT:
+            self.skip_to_next()
         elif command == tray.CMD_PAUSE:
             self.toggle_pause()
         elif command == tray.CMD_STOP:
@@ -548,6 +841,8 @@ class GlobalReader(tk.Tk):
             self._handle_hotkey(value)
         elif kind == "menu":
             self._handle_menu(value)
+        elif kind == "clipboard":
+            self._on_clipboard_update(value)
 
     def _handle_reply(self, reply: tuple[str, ...]) -> None:
         tag = reply[0]
@@ -568,7 +863,7 @@ class GlobalReader(tk.Tk):
             self.awaiting_speak_ack = False
 
         elif tag == "STATE":
-            if self.awaiting_speak_ack:
+            if self.awaiting_speak_ack or self._announcing:
                 return
             if self.state_name == "speaking" and len(reply) > 2 and reply[2] == "1":
                 self.index += 1
@@ -620,13 +915,15 @@ class GlobalReader(tk.Tk):
 
     def _on_close(self) -> None:
         self._closing = True
-        for job in (self._tick_job, self._restart_job, self._restore_job):
+        for job in (self._tick_job, self._restart_job, self._restore_job,
+                    self._auto_job):
             if job is not None:
                 try:
                     self.after_cancel(job)
                 except tk.TclError:
                     pass
-        self._tick_job = self._restart_job = self._restore_job = None
+        self._tick_job = self._restart_job = None
+        self._restore_job = self._auto_job = None
         settings.save(self.prefs)
         try:
             self.tray.stop()
@@ -644,7 +941,17 @@ def main() -> int:
     if sys.platform != "win32":
         print("Read Aloud Anywhere uses Windows hotkeys and SAPI; Windows only.")
         return 1
-    GlobalReader().mainloop()
+
+    handle, already_running = claim_single_instance()
+    if already_running:
+        release_single_instance(handle)
+        warn_already_running()
+        return 0
+
+    try:
+        GlobalReader().mainloop()
+    finally:
+        release_single_instance(handle)
     return 0
 
 

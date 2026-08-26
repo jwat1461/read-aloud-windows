@@ -4,17 +4,81 @@ Registers the real system hotkeys and adds a real notification-area icon for the
 duration of the run. Speech plays at low volume.
 
 Note: these deliberately never call send_copy(), which would inject a real Ctrl+C
-into whatever window happens to be focused.
+into whatever window happens to be focused. The auto-read tests put text on the
+clipboard through the Win32 API rather than Tk, because the formats a password
+manager attaches are the whole point and Tk cannot write them.
 
     python -m unittest test_global_reader -v
 """
 
+import ctypes
+import gc
+import subprocess
+import sys
 import time
 import unittest
+from ctypes import wintypes
+from pathlib import Path
 
 import global_reader
+import settings
 import tray
 from global_reader import HOTKEYS, GlobalReader
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+GMEM_MOVEABLE = 0x0002
+
+kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.SetClipboardData.restype = wintypes.HANDLE
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+user32.RegisterClipboardFormatW.restype = wintypes.UINT
+user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+
+CF_BINARY_JUNK = user32.RegisterClipboardFormatW("ReadAloudTestBinary")
+
+
+def _moveable(data: bytes):
+    """A GMEM_MOVEABLE copy of `data`; the clipboard owns it once handed over."""
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    pointer = kernel32.GlobalLock(handle)
+    ctypes.memmove(pointer, data, len(data))
+    kernel32.GlobalUnlock(handle)
+    return handle
+
+
+def set_clipboard(hwnd, text=None, extra=()):
+    """Write the clipboard the Win32 way, with whatever extra formats we like.
+
+    `hwnd` has to be a real window: EmptyClipboard called with a NULL owner
+    leaves the clipboard ownerless and every SetClipboardData after it fails.
+    """
+    for _attempt in range(20):
+        if user32.OpenClipboard(hwnd):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("another process is holding the clipboard open")
+    try:
+        user32.EmptyClipboard()
+        if text is not None:
+            user32.SetClipboardData(
+                global_reader.CF_UNICODETEXT,
+                _moveable(text.encode("utf-16-le") + bytes(2)),
+            )
+        for fmt, value in extra:
+            user32.SetClipboardData(fmt, _moveable(int(value).to_bytes(4, "little")))
+    finally:
+        user32.CloseClipboard()
 
 
 def pump(app, seconds, until=None):
@@ -32,13 +96,47 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.app = GlobalReader()
         self.app.update()
         pump(self.app, 6, lambda: bool(self.app.voice_box.cget("values")))
+        self.app.prefs["auto_read_clipboard"] = False
         self.app.set_volume(12)
         self.app.set_rate(6)
         self.app.update()
 
     def tearDown(self):
+        # Auto-read is shared, persisted state: never leave a test run with it
+        # switched on, or the machine starts reading everything you copy.
+        self.app.prefs["auto_read_clipboard"] = False
+        self.app.prefs["auto_read_max_chars"] = settings.DEFAULTS["auto_read_max_chars"]
         self.app._on_close()
         self.assertFalse(self.app.engine.alive)
+        # Tk only tears its interpreter down when the object is finally freed,
+        # and that has to happen here, on the thread that built it. Left to a
+        # collection triggered from the tray or speech-reader thread it aborts
+        # the run with "Tcl_AsyncDelete: async handler deleted by the wrong
+        # thread", tens of tests later and nowhere near the cause.
+        self.app = None
+        gc.collect()
+
+    # ------------------------------------------------------------- helpers
+
+    def _clipboard(self, text=None, extra=()):
+        set_clipboard(self.app.winfo_id(), text, extra)
+        self.app.update()
+
+    def _update_now(self):
+        """Deliver a clipboard update the way the tray thread would."""
+        self.app._on_clipboard_update(tray.clipboard_sequence())
+
+    def _record_spoken(self):
+        """Collect the texts that actually reach the player, in order."""
+        spoken = []
+        original = self.app.speak
+
+        def recording(text, scope):
+            spoken.append(text)
+            original(text, scope)
+
+        self.app.speak = recording
+        return spoken
 
     # ---------------------------------------------------------------- hotkeys
 
@@ -61,6 +159,42 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.app.tray.stop()
         self.app.tray.join(timeout=5)
         self.assertFalse(self.app.tray.is_alive())
+
+    def test_a_hotkey_clash_is_announced_and_not_swallowed(self):
+        balloons = []
+        self.app.tray.notify = (
+            lambda title, message, warning=False: balloons.append((message, warning))
+        )
+        self.app.tray.failed_hotkeys = ["Ctrl+Alt+R", "Ctrl+Alt+S"]
+        self.app._report_hotkey_failures()
+
+        self.assertEqual(len(balloons), 1, "a lost hotkey went unreported")
+        message, warning = balloons[0]
+        self.assertIn("Ctrl+Alt+R", message)
+        self.assertIn("Ctrl+Alt+S", message)
+        self.assertTrue(warning)
+        self.assertIn("Ctrl+Alt+R", self.app.status_var.get())
+
+    def test_a_second_copy_bows_out_and_leaves_the_hotkeys_alone(self):
+        """Two copies would fight over the hotkeys, and the loser goes silent."""
+        handle, _already = global_reader.claim_single_instance()
+        try:
+            second = subprocess.run(
+                [sys.executable, str(Path(global_reader.__file__).resolve())],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("already running", second.stdout.lower())
+        finally:
+            global_reader.release_single_instance(handle)
+
+        # ...and it did not take Ctrl+Alt+R down with it on the way out.
+        stolen = tray.user32.RegisterHotKey(None, 987, global_reader._MODS, ord("R"))
+        if stolen:
+            tray.user32.UnregisterHotKey(None, 987)
+        self.assertFalse(stolen, "the first copy lost Ctrl+Alt+R")
 
     # -------------------------------------------------------------- playback
 
@@ -276,11 +410,246 @@ class GlobalReaderBehaviour(unittest.TestCase):
         fixed = {
             tray.CMD_SHOW, tray.CMD_READ_CLIPBOARD, tray.CMD_READ_SELECTION,
             tray.CMD_PAUSE, tray.CMD_STOP, tray.CMD_QUIT,
+            tray.CMD_AUTO_READ, tray.CMD_NEXT,
         }
-        self.assertEqual(len(fixed), 6)
+        self.assertEqual(len(fixed), 8)
         self.assertTrue(max(fixed) < tray.CMD_VOICE_BASE)
         self.assertTrue(tray.CMD_VOICE_BASE + 500 <= tray.CMD_RATE_BASE)
         self.assertTrue(tray.CMD_RATE_BASE + 500 <= tray.CMD_VOLUME_BASE)
+
+    # ------------------------------------------------------------- auto-read
+
+    def test_auto_read_speaks_newly_copied_text(self):
+        self.assertTrue(
+            self.app.tray.clipboard_listener_ok, "no clipboard listener registered"
+        )
+        self.app.prefs["auto_read_clipboard"] = True
+        self._clipboard("Something freshly copied.")
+        self._update_now()
+
+        self.assertTrue(
+            pump(self.app, 3, lambda: self.app.state_name == "speaking"),
+            "auto-read never started",
+        )
+        self.assertEqual(self.app.pieces, ["Something freshly copied."])
+        self.app.stop()
+
+    def test_auto_read_ignores_an_identical_repeat(self):
+        self.app.prefs["auto_read_clipboard"] = True
+        self._clipboard("Copied once, then copied again.")
+        self._update_now()
+        self.assertTrue(pump(self.app, 3, lambda: self.app.state_name == "speaking"))
+        self.app.stop()
+
+        self._clipboard("Copied once, then copied again.")
+        self._update_now()
+        pump(self.app, 1.0)
+        self.assertEqual(self.app.state_name, "idle", "the repeat was read again")
+
+    def test_auto_read_ignores_updates_without_text(self):
+        self.app.prefs["auto_read_clipboard"] = True
+        self._clipboard(text=None, extra=[(CF_BINARY_JUNK, 1)])
+        self.assertFalse(global_reader.clipboard_has_text())
+        self._update_now()
+
+        pump(self.app, 1.0)
+        self.assertEqual(self.app.state_name, "idle")
+
+    def test_auto_read_never_touches_content_marked_private(self):
+        secret = "correct horse battery staple"
+        self.app.prefs["auto_read_clipboard"] = True
+        spoken = []
+        self.app.engine.speak = spoken.append
+
+        self._clipboard(secret, extra=[(global_reader.CF_EXCLUDE_MONITOR, 1)])
+        self.assertTrue(global_reader.clipboard_is_private())
+        self._update_now()
+        pump(self.app, 1.0)
+
+        # CanIncludeInClipboardHistory = 0 is the other way apps say the same.
+        self._clipboard(secret, extra=[(global_reader.CF_CLIPBOARD_HISTORY, 0)])
+        self.assertTrue(global_reader.clipboard_is_private())
+        self._update_now()
+        pump(self.app, 1.0)
+
+        self.assertEqual(spoken, [], "a password reached the speech engine")
+        self.assertEqual(self.app.state_name, "idle")
+        self.assertIsNone(self.app._last_auto_read)
+        self.assertNotIn(secret, self.app.status_var.get())
+
+    def test_auto_read_ignores_our_own_copy_and_restore(self):
+        self.app.prefs["auto_read_clipboard"] = True
+
+        self.app._begin_own_clipboard()
+        self._clipboard("What our synthetic Ctrl+C put there.")
+        self._update_now()
+        pump(self.app, 0.6)
+        self.assertEqual(self.app.state_name, "idle", "read our own copy")
+
+        self._clipboard("What the user had copied before.")
+        seq = tray.clipboard_sequence()
+        self.app._end_own_clipboard()
+        self.app._on_clipboard_update(seq)
+        pump(self.app, 0.6)
+        self.assertEqual(self.app.state_name, "idle", "read our own restore")
+
+        # ...and the very next copy, outside the window, is fair game again.
+        self._clipboard("A copy the user actually made.")
+        self._update_now()
+        self.assertTrue(pump(self.app, 3, lambda: self.app.state_name == "speaking"))
+        self.app.stop()
+
+    def test_a_burst_of_updates_is_read_once(self):
+        self.app.prefs["auto_read_clipboard"] = True
+        spoken = self._record_spoken()
+
+        started = time.monotonic()
+        for text in ("Burst one.", "Burst two.", "Burst three."):
+            set_clipboard(self.app.winfo_id(), text)
+            self._update_now()
+        self.assertLess(
+            time.monotonic() - started,
+            global_reader.AUTO_READ_DEBOUNCE_MS / 1000,
+            "the burst took longer than the debounce; test is inconclusive",
+        )
+
+        self.assertTrue(pump(self.app, 3, lambda: len(spoken) == 1))
+        pump(self.app, 0.5)
+        self.assertEqual(spoken, ["Burst three."])
+        self.app.stop()
+
+    def test_auto_read_caps_long_text_and_says_there_is_more(self):
+        self.app.prefs["auto_read_clipboard"] = True
+        self.app.prefs["auto_read_max_chars"] = 40
+        spoken = self._record_spoken()
+
+        self._clipboard("plenty of words to go around " * 20)
+        self._update_now()
+        self.assertTrue(pump(self.app, 3, lambda: bool(spoken)))
+
+        self.assertTrue(spoken[0].startswith("plenty of words"))
+        self.assertTrue(spoken[0].endswith(global_reader.AUTO_READ_TAIL))
+        self.assertLessEqual(len(spoken[0]), 40 + len(global_reader.AUTO_READ_TAIL) + 1)
+        self.app.stop()
+
+    def test_auto_read_toggle_persists_and_both_routes_flip_it(self):
+        self.app.prefs["auto_read_clipboard"] = False
+
+        self.app._handle_hotkey(global_reader.HOTKEY_AUTO_READ)
+        self.assertTrue(self.app.prefs["auto_read_clipboard"])
+        self.assertTrue(settings.load()["auto_read_clipboard"])
+        self.assertTrue(self.app.tray.snapshot()["auto_read"])
+        self.assertIn("Auto-read: on", self.app.tray.tooltip_text())
+
+        self.app._handle_menu(tray.CMD_AUTO_READ)
+        self.assertFalse(self.app.prefs["auto_read_clipboard"])
+        self.assertFalse(settings.load()["auto_read_clipboard"])
+        self.assertFalse(self.app.tray.snapshot()["auto_read"])
+        self.assertIn("Auto-read: off", self.app.tray.tooltip_text())
+
+    # ----------------------------------------------------------- the queue
+
+    def test_copies_are_read_in_the_order_they_were_made(self):
+        self.app.prefs["auto_read_clipboard"] = True
+        self.app.set_rate(6)
+        spoken = self._record_spoken()
+
+        for text in ("Queued first.", "Queued second.", "Queued third."):
+            self._clipboard(text)
+            self._update_now()
+            pump(self.app, 0.3)
+
+        self.assertTrue(
+            pump(self.app, 45, lambda: len(spoken) == 3 and self.app.state_name == "idle"),
+            f"the queue never drained: {spoken}",
+        )
+        self.assertEqual(spoken, ["Queued first.", "Queued second.", "Queued third."])
+
+    def test_stop_empties_the_whole_queue(self):
+        self.app.set_rate(-2)
+        self.app.speak("The item that happens to be playing.", "clipboard")
+        self.app.toggle_pause()  # hold it so the queue cannot drain under us
+
+        self.app._enqueue_auto_read("Waiting one.")
+        self.app._enqueue_auto_read("Waiting two.")
+        self.assertEqual(len(self.app.auto_queue), 2)
+
+        self.app._handle_hotkey(global_reader.HOTKEY_STOP)
+        self.assertEqual(self.app.auto_queue, [])
+        self.assertEqual(self.app.state_name, "idle")
+
+    def test_skip_to_next_starts_the_next_queued_item(self):
+        self.app.set_rate(-2)
+        self.app.speak("The item we are about to skip past.", "clipboard")
+        self.app._enqueue_auto_read("The item that comes after it.")
+        self.assertEqual(len(self.app.auto_queue), 1)
+
+        self.app._handle_hotkey(global_reader.HOTKEY_NEXT)
+        self.assertEqual(self.app.state_name, "speaking")
+        self.assertEqual(self.app.pieces, ["The item that comes after it."])
+        self.assertEqual(self.app.auto_queue, [])
+
+        # Nothing left to move on to, so the next press just stops.
+        self.app._handle_hotkey(global_reader.HOTKEY_NEXT)
+        self.assertEqual(self.app.state_name, "idle")
+
+    def test_pause_holds_the_queue_and_resumes_the_same_item(self):
+        self.app.set_rate(-4)
+        self.app.speak("A deliberately unhurried sentence, to leave time.", "clipboard")
+        self.app._enqueue_auto_read("The one that must wait its turn.")
+        playing = list(self.app.pieces)
+
+        self.app._handle_hotkey(global_reader.HOTKEY_PAUSE)
+        self.assertEqual(self.app.state_name, "paused")
+        pump(self.app, 1.5)
+        self.assertEqual(self.app.auto_queue, ["The one that must wait its turn."])
+        self.assertEqual(self.app.pieces, playing)
+
+        self.app._handle_hotkey(global_reader.HOTKEY_PAUSE)
+        self.assertEqual(self.app.state_name, "speaking")
+        self.assertEqual(self.app.pieces, playing, "resume started something else")
+        self.assertEqual(len(self.app.auto_queue), 1)
+        self.app.stop()
+
+    def test_turning_auto_read_off_still_finishes_the_queue(self):
+        self.app.prefs["auto_read_clipboard"] = True
+        self.app.set_rate(6)
+        spoken = self._record_spoken()
+
+        self.app.speak("Already playing.", "clipboard")
+        self.app._enqueue_auto_read("Already queued and still owed.")
+
+        self.app._handle_hotkey(global_reader.HOTKEY_AUTO_READ)
+        self.assertFalse(self.app.prefs["auto_read_clipboard"])
+
+        self._clipboard("Copied after the switch went off.")
+        self._update_now()
+        pump(self.app, 0.6)
+        self.assertNotIn("Copied after the switch went off.", self.app.auto_queue)
+
+        self.assertTrue(
+            pump(self.app, 45, lambda: self.app.state_name == "idle"),
+            "the queue never drained",
+        )
+        self.assertEqual(
+            spoken, ["Already playing.", "Already queued and still owed."]
+        )
+
+    def test_the_queue_drops_the_oldest_unread_when_it_overflows(self):
+        self.app.set_rate(-2)
+        self.app.speak("The item playing while the queue fills up.", "clipboard")
+        self.app.toggle_pause()
+
+        for n in range(1, global_reader.AUTO_READ_QUEUE_MAX + 2):
+            self.app._enqueue_auto_read(f"Item {n}.")
+
+        self.assertEqual(len(self.app.auto_queue), global_reader.AUTO_READ_QUEUE_MAX)
+        self.assertNotIn("Item 1.", self.app.auto_queue)
+        self.assertEqual(self.app.auto_queue[0], "Item 2.")
+        self.assertEqual(self.app.auto_queue[-1], "Item 21.")
+        self.assertTrue(self.app.queue_dropped)
+        self.assertIn("oldest dropped", self.app.tray.tooltip_text())
+        self.app.stop()
 
 
 if __name__ == "__main__":

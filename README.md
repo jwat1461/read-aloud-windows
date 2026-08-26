@@ -74,8 +74,30 @@ way. From then on, in **any** application:
 |---|---|
 | `Ctrl+Alt+R` | Read the selected text — **press again to stop** |
 | `Ctrl+Alt+C` | Read whatever is on the clipboard |
+| `Ctrl+Alt+A` | Auto-read the clipboard — on / off |
+| `Ctrl+Alt+N` | Skip to the next queued item |
 | `Ctrl+Alt+P` | Pause / resume |
-| `Ctrl+Alt+S` | Stop |
+| `Ctrl+Alt+S` | Stop (also empties the auto-read queue) |
+
+### Auto-read the clipboard
+
+Press `Ctrl+Alt+A`, or tick **Auto-read clipboard** in the tray menu, and
+anything that lands on the clipboard from then on is read without you pressing
+anything else. Toggling says "on" or "off" out loud so you know it took, and the
+switch is remembered in `settings.json` like everything else, so it survives a
+restart. Copies queue in the order you made them: a new copy waits its turn
+rather than cutting the current one off, `Ctrl+Alt+N` skips to the next,
+`Ctrl+Alt+P` holds the line, and `Ctrl+Alt+S` is the only thing that empties it.
+Twenty items can be waiting; past that the oldest unread one is dropped. Text a
+password manager has marked private — the
+`ExcludeClipboardContentFromMonitorProcessing` format, or
+`CanIncludeInClipboardHistory` set to zero — is skipped without ever being
+looked at, and anything longer than 20,000 characters (`auto_read_max_chars` in
+the settings file) is read up to that point and finished with "and more". Hover
+the tray icon to see whether it is on and how many copies are waiting.
+
+**While it is on it reads everything you copy**, so turn it off before copying
+anything you would rather not hear out loud.
 
 ### The tray icon
 
@@ -84,7 +106,8 @@ way. From then on, in **any** application:
 - **Voice** — every installed voice, with the current one ticked
 - **Speed** — Very slow · Slow · Normal · Fast · Faster · Fastest
 - **Volume** — Mute · 25% · 50% · 75% · 100%
-- Read selection · Read clipboard · Pause · **Stop reading**
+- **Auto-read clipboard** — tick it and every copy is read; `Ctrl+Alt+A`
+- Read selection · Read clipboard · Pause · Skip to next · **Stop reading**
 - Open Read Aloud · Quit
 
 Left-click the icon to open the window, which has the same voice dropdown plus
@@ -108,6 +131,13 @@ powershell -ExecutionPolicy Bypass -File tools\install_startup.ps1 -Remove   # u
 `Add to Startup.bat` puts a shortcut in your own Startup folder and launches it
 straight away, so you don't have to sign out first. Undo with
 **`Remove from Startup.bat`**.
+
+Only one copy runs at a time. Start a second and it says
+*"Read Aloud Anywhere is already running"* in a balloon by the clock and exits,
+rather than starting up with every hotkey silently dead — `RegisterHotKey` is
+first come, first served. If a hotkey is taken by some *other* program, the
+balloon names the combination so you are never left wondering why nothing
+happens.
 
 ### How it reads other applications
 
@@ -220,7 +250,7 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet     # no sound, no
 powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DOM suite
 ```
 
-88 tests across six suites:
+104 tests across six suites:
 
 | Suite | Tests | What it covers |
 |---|---|---|
@@ -228,7 +258,7 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DO
 | `parity` | 5 | The Python and JavaScript chunkers produce identical sentences |
 | `engine` | 11 | Live round trip against the PowerShell SAPI server, including WAV output |
 | `app` | 16 | Drives the real Tk window: playback, highlighting, seeking, settings |
-| `global` | 27 | Real system hotkeys and tray icon, menu commands, clipboard capture |
+| `global` | 43 | Real system hotkeys and tray icon, menu commands, clipboard capture, auto-read and its queue, single-instance guard |
 | `dom` | 18 | Extension text extraction, DOM range mapping and highlighting, in Chrome |
 
 The `engine`, `app` and `global` suites make sound (at low volume) and briefly
@@ -293,9 +323,8 @@ code units — and each is checked against its own runtime.
 **Nothing is spoken.** Check Windows volume and that a voice is selected in the
 dropdown. Then run `python app\tts_app.py` from a terminal to see any error.
 
-**`Ctrl+Alt+R` does nothing.** Another program may already own that combination —
-the window shows which hotkeys failed to register. A second copy of Read Aloud
-Anywhere already running will do that too, so check the tray first. Also check
+**`Ctrl+Alt+R` does nothing.** Another program already owns that combination. A
+balloon by the clock names it at startup and the window lists it too. Also check
 the target app is not running as administrator.
 
 **No W icon by the clock.** Windows 11 hides new tray icons: click the `^` next

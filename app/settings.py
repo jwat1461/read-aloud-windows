@@ -10,7 +10,13 @@ import json
 import os
 from pathlib import Path
 
-DEFAULTS: dict = {"voice": "", "rate": 0, "volume": 100}
+DEFAULTS: dict = {
+    "voice": "",
+    "rate": 0,
+    "volume": 100,
+    "auto_read_clipboard": False,
+    "auto_read_max_chars": 20000,
+}
 
 SETTINGS_PATH = (
     Path(os.environ.get("APPDATA") or Path.home()) / "ReadAloud" / "settings.json"
@@ -25,6 +31,12 @@ def load() -> dict:
         return values
     if isinstance(stored, dict):
         values.update({k: stored[k] for k in DEFAULTS if k in stored})
+    # Hand-edited files are a fact of life; coerce rather than trust.
+    values["auto_read_clipboard"] = bool(values["auto_read_clipboard"])
+    try:
+        values["auto_read_max_chars"] = max(1, int(values["auto_read_max_chars"]))
+    except (TypeError, ValueError):
+        values["auto_read_max_chars"] = DEFAULTS["auto_read_max_chars"]
     return values
 
 
