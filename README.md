@@ -88,13 +88,30 @@ switch is remembered in `settings.json` like everything else, so it survives a
 restart. Copies queue in the order you made them: a new copy waits its turn
 rather than cutting the current one off, `Ctrl+Alt+N` skips to the next,
 `Ctrl+Alt+P` holds the line, and `Ctrl+Alt+S` is the only thing that empties it.
-Twenty items can be waiting; past that the oldest unread one is dropped. Text a
-password manager has marked private — the
-`ExcludeClipboardContentFromMonitorProcessing` format, or
-`CanIncludeInClipboardHistory` set to zero — is skipped without ever being
-looked at, and anything longer than 20,000 characters (`auto_read_max_chars` in
-the settings file) is read up to that point and finished with "and more". Hover
-the tray icon to see whether it is on and how many copies are waiting.
+Twenty items can be waiting; past that the oldest unread one is dropped.
+Anything longer than 20,000 characters (`auto_read_max_chars` in the settings
+file) is read up to that point and finished with "and more". Hover the tray icon
+to see whether it is on and how many copies are waiting.
+
+### What a password manager marks private is never fetched
+
+Not merely never spoken — never fetched. When an update arrives, the clipboard
+*formats* are inspected first: if the content carries
+`ExcludeClipboardContentFromMonitorProcessing`, or has
+`CanIncludeInClipboardHistory` set to zero, the reader returns before it asks
+for the text at all. Nothing enters the process, so there is nothing to reach
+the speech engine, the status line or a log.
+
+The evidence for that is not the silence — silence is what you would also get
+from reading the password and deciding not to say it. It is the memory. The
+reader keeps the last thing it auto-read, to avoid repeating a re-copy; after a
+private copy, that record still holds the *previous* text, which it could not if
+the new one had ever been read. The `global` suite asserts exactly this, and so
+does a live trial against a real password-manager-style clipboard write.
+
+If the formats are present but unreadable — another process has the clipboard
+open — the content counts as private too. Staying quiet costs one read; guessing
+costs a password.
 
 **While it is on it reads everything you copy**, so turn it off before copying
 anything you would rather not hear out loud.
