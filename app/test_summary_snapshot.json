@@ -1,0 +1,116 @@
+{
+  "01_escalation": {
+    "bypass": null,
+    "picked": [
+      "The\nclient has asked three times now and is threatening to ask for a refund.",
+      "The deadline was Friday\nand it is now Tuesday."
+    ]
+  },
+  "02_meeting_minutes": {
+    "bypass": null,
+    "picked": [
+      "Two people asked about transport,\nwhich we still cannot help with.",
+      "We are late filing the annual\nreturn and the deadline has already passed once."
+    ]
+  },
+  "03_release_notes": {
+    "bypass": null,
+    "picked": [
+      "This release adds a tray icon with voice, speed and volume controls.",
+      "It fixes TTS error storms that could\nfill the log."
+    ]
+  },
+  "04_plain_prose": {
+    "bypass": null,
+    "picked": [
+      "The roses came back after the frost and the\nhedge has thickened up nicely.",
+      "There is a blackbird nesting in the\nivy again."
+    ]
+  },
+  "05_paragraphs": {
+    "bypass": "too few words",
+    "picked": [
+      "First paragraph, one sentence only.",
+      "Second paragraph opens here.",
+      "It runs to two sentences.",
+      "Third paragraph closes the piece."
+    ]
+  },
+  "06_abbreviations": {
+    "bypass": "too few words",
+    "picked": [
+      "Dr.",
+      "Adeyemi signed off at 4 p.m.",
+      "on Tue.",
+      "The invoice from Acme Ltd.",
+      "was for\n$1,240.50 excl.",
+      "VAT.",
+      "Mr.",
+      "Okafor disputes it.",
+      "See appendix A.2 for the\nbreakdown.",
+      "It has not been resolved."
+    ]
+  },
+  "07_questions": {
+    "bypass": "too few words",
+    "picked": [
+      "Why did the job fail?",
+      "Was anyone paged?",
+      "The runbook says to restart the\nworker, but nobody did.",
+      "Can we agree who owns this before Friday?",
+      "It cannot\nwait another sprint."
+    ]
+  },
+  "08_unicode": {
+    "bypass": "too few words",
+    "picked": [
+      "El proceso falló otra vez — nadie sabe por qué.",
+      "La fecha límite era el\nviernes…",
+      "y seguimos bloqueados.",
+      "«No podemos continuar así», dijo el cliente.",
+      "Coût estimé : 4 000 € par mois.",
+      "Ça ne peut pas durer."
+    ]
+  },
+  "09_long_run": {
+    "bypass": "too few sentences",
+    "picked": [
+      "this is a deliberately long stretch of text with no sentence ending\npunctuation at all which exists purely so the chunker has to fall back on its\nmaximum length rule and break at a word boundary somewhere sensible rather\nthan handing the speech engine one enormous utterance that",
+      "cannot be paused or\nstopped or highlighted in any useful way and which would also take a very long\ntime to finish reading out loud if anybody actually let it get that far"
+    ]
+  },
+  "10_lists_and_numbers": {
+    "bypass": "too few words",
+    "picked": [
+      "Three things went wrong.",
+      "1.",
+      "The nightly build timed out after 45 minutes.",
+      "2.",
+      "The cache was 80% cold on restart.",
+      "3.",
+      "Two customers hit the 500 error.",
+      "Total\ndowntime was 3 hours 12 minutes.",
+      "The cost is roughly £900."
+    ]
+  },
+  "11_quotes": {
+    "bypass": "too few words",
+    "picked": [
+      "\"We cannot ship this,\" she said.",
+      "\"Not on Friday.\"",
+      "The team agreed.",
+      "\"Then it\nslips,\" he replied, \"and we tell them today.\"",
+      "Nobody argued with that."
+    ]
+  },
+  "12_mixed_whitespace": {
+    "bypass": "too few words",
+    "picked": [
+      "Leading whitespace here.",
+      "A tab follows the first sentence.",
+      "Then a newline and more text.",
+      "Two blank lines above this one.",
+      "Trailing spaces after this."
+    ]
+  }
+}
