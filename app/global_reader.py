@@ -6,6 +6,7 @@ voice, speed and volume, or to stop whatever is being read.
     Ctrl+Alt+R   read the selected text — press again to stop
     Ctrl+Alt+C   read whatever is on the clipboard
     Ctrl+Alt+A   auto-read the clipboard, on / off
+    Ctrl+Alt+M   summary mode, on / off
     Ctrl+Alt+N   skip to the next queued item
     Ctrl+Alt+P   pause / resume
     Ctrl+Alt+S   stop
@@ -60,6 +61,7 @@ HOTKEY_PAUSE = 3
 HOTKEY_STOP = 4
 HOTKEY_AUTO_READ = 5
 HOTKEY_NEXT = 6
+HOTKEY_SUMMARY = 7
 
 _MODS = tray.MOD_CONTROL | tray.MOD_ALT | tray.MOD_NOREPEAT
 
@@ -68,6 +70,7 @@ HOTKEYS = {
     HOTKEY_CLIPBOARD: (_MODS, ord("C"), "Ctrl+Alt+C", "Read clipboard"),
     HOTKEY_AUTO_READ: (_MODS, ord("A"), "Ctrl+Alt+A", "Auto-read clipboard on/off"),
     HOTKEY_NEXT: (_MODS, ord("N"), "Ctrl+Alt+N", "Skip to next queued"),
+    HOTKEY_SUMMARY: (_MODS, ord("M"), "Ctrl+Alt+M", "Summary mode on/off"),
     HOTKEY_PAUSE: (_MODS, ord("P"), "Ctrl+Alt+P", "Pause / resume"),
     HOTKEY_STOP: (_MODS, ord("S"), "Ctrl+Alt+S", "Stop"),
 }
@@ -468,6 +471,7 @@ class GlobalReader(tk.Tk):
             state=self.state_name,
             status=self.status_var.get(),
             auto_read=bool(self.prefs["auto_read_clipboard"]),
+            summary_mode=bool(self.prefs["summary_mode"]),
             queued=len(self.auto_queue),
             queue_dropped=self.queue_dropped,
         )
@@ -683,6 +687,22 @@ class GlobalReader(tk.Tk):
             # up from the start on resume rather than skipping to the next.
             self._paused_needs_restart = True
 
+    def toggle_summary_mode(self) -> None:
+        """Ctrl+Alt+M. Balloons rather than speaks: the mode changes what you
+        are about to hear, so announcing it in the reading voice would be the
+        one confusing way to say it."""
+        on = not self.prefs["summary_mode"]
+        self.prefs["summary_mode"] = on
+        settings.save(self.prefs)
+        self.tray.notify(
+            "Read Aloud Anywhere", "Summary mode on" if on else "Summary mode off"
+        )
+        self._set_status(
+            "Summary mode is on — reads the pain points, not the whole thing"
+            if on
+            else "Summary mode is off"
+        )
+
     def skip_to_next(self) -> None:
         """Ctrl+Alt+N — drop what is playing and start the next queued item."""
         if self.state_name == "idle" and not self.auto_queue:
@@ -693,14 +713,14 @@ class GlobalReader(tk.Tk):
     # -------------------------------------------------------------- playback
 
     def speak(self, text: str, scope: str) -> None:
-        plan = reading.plan(text)
+        plan = reading.plan(text, summary=bool(self.prefs["summary_mode"]))
         if not plan:
             self._set_status("Nothing to read")
             return
         self.pieces = plan.sentences
         self.index = 0
         self.state_name = "speaking"
-        self.scope = scope
+        self.scope = f"{scope} summary" if plan.summarized else scope
         self._sync_buttons()
         self._speak_current()
 
@@ -799,6 +819,8 @@ class GlobalReader(tk.Tk):
             self.toggle_auto_read()
         elif hotkey_id == HOTKEY_NEXT:
             self.skip_to_next()
+        elif hotkey_id == HOTKEY_SUMMARY:
+            self.toggle_summary_mode()
         elif hotkey_id == HOTKEY_PAUSE:
             self.toggle_pause()
         elif hotkey_id == HOTKEY_STOP:
@@ -815,6 +837,8 @@ class GlobalReader(tk.Tk):
             self.toggle_auto_read()
         elif command == tray.CMD_NEXT:
             self.skip_to_next()
+        elif command == tray.CMD_SUMMARY:
+            self.toggle_summary_mode()
         elif command == tray.CMD_PAUSE:
             self.toggle_pause()
         elif command == tray.CMD_STOP:

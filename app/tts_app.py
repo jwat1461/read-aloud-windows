@@ -113,6 +113,17 @@ class ReadAloudApp(tk.Tk):
     def _save_settings(self) -> None:
         settings.save(self.settings)
 
+    def _on_summary_toggle(self) -> None:
+        """Shares summary_mode with the tray reader through settings.json, the
+        same way voice and speed have always been shared."""
+        self.settings["summary_mode"] = bool(self.summary_var.get())
+        self._save_settings()
+        self.status_var.set(
+            "Summary mode on — Read will speak the pain points"
+            if self.settings["summary_mode"]
+            else "Summary mode off"
+        )
+
     # ---------------------------------------------------------------- style
 
     def _build_style(self) -> None:
@@ -127,6 +138,19 @@ class ReadAloudApp(tk.Tk):
             "PanelMuted.TLabel", background=PANEL, foreground=MUTED, font=FONT
         )
         style.configure("Panel.TLabel", background=PANEL, foreground=TEXT, font=FONT)
+        style.configure(
+            "Panel.TCheckbutton",
+            background=PANEL,
+            foreground=TEXT,
+            font=FONT,
+            focuscolor=PANEL,
+            indicatorcolor=FIELD,
+        )
+        style.map(
+            "Panel.TCheckbutton",
+            background=[("active", PANEL)],
+            indicatorcolor=[("selected", ACCENT)],
+        )
         style.configure(
             "Title.TLabel", background=BG, foreground=TEXT, font=FONT_TITLE
         )
@@ -340,6 +364,15 @@ class ReadAloudApp(tk.Tk):
         vol_scale.grid(row=0, column=5, sticky="ew")
         ctrl.columnconfigure(5, weight=2)
 
+        self.summary_var = tk.BooleanVar(value=bool(self.settings["summary_mode"]))
+        ttk.Checkbutton(
+            ctrl,
+            text="Summary mode",
+            variable=self.summary_var,
+            command=self._on_summary_toggle,
+            style="Panel.TCheckbutton",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         self._update_rate_label()
         self._update_volume_label()
 
@@ -496,12 +529,13 @@ class ReadAloudApp(tk.Tk):
             return
 
         selection = self._selection_range()
+        summary = bool(self.settings["summary_mode"])
         if selection:
             start, end = selection
-            plan = reading.plan(content[start:end], offset=start)
+            plan = reading.plan(content[start:end], offset=start, summary=summary)
             self.scope = "selection"
         else:
-            plan = reading.plan(content)
+            plan = reading.plan(content, summary=summary)
             self.scope = "document"
 
         self.pieces = plan.pieces

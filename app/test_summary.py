@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 
 import reading
+import settings
 import summarize
 
 # --------------------------------------------------------------------- corpus
@@ -253,6 +254,73 @@ class Summarizer(unittest.TestCase):
         finally:
             socket.socket = real
         self.assertEqual(opened, [])
+
+
+class PlanWithSummaryMode(unittest.TestCase):
+    """The one hook. Nothing else in the app is allowed to summarize."""
+
+    def test_summary_off_is_byte_identical_to_no_summary_mode_at_all(self):
+        for name, text in CORPUS.items():
+            off = reading.plan(text, summary=False)
+            self.assertFalse(off.summarized, name)
+            self.assertEqual(off.text, text)
+            self.assertEqual(off.source, text)
+            self.assertEqual(off.sentences, sentences_of(text), name)
+
+    def test_summary_on_replaces_the_text_but_keeps_the_source(self):
+        text = CORPUS["escalation"]
+        on = reading.plan(text, summary=True)
+        self.assertTrue(on.summarized)
+        self.assertEqual(on.source, text)
+        self.assertNotEqual(on.text, text)
+        self.assertLess(len(on.sentences), len(sentences_of(text)))
+        self.assertEqual(on.sentences, summarize.summarize(text))
+
+    def test_summary_spans_point_into_the_summary_it_returns(self):
+        on = reading.plan(CORPUS["meeting"], summary=True)
+        self.assertTrue(on.summarized)
+        for start, end, piece in on.pieces:
+            self.assertEqual(on.text[start:end], piece)
+
+    def test_a_bypass_is_indistinguishable_from_the_mode_being_off(self):
+        """Short text: the caller must not be able to tell summary mode was on,
+        or the desktop app would offer a Source pane with nothing behind it."""
+        on = reading.plan(SHORT_THREE_SENTENCES, summary=True)
+        off = reading.plan(SHORT_THREE_SENTENCES, summary=False)
+        self.assertFalse(on.summarized)
+        self.assertEqual(on.text, off.text)
+        self.assertEqual(on.pieces, off.pieces)
+
+    def test_the_stored_setting_is_the_fallback_when_none_is_passed(self):
+        stored = settings.load()
+        try:
+            saved = dict(stored)
+            saved["summary_mode"] = False
+            settings.save(saved)
+            self.assertFalse(reading.plan(CORPUS["escalation"]).summarized)
+
+            saved["summary_mode"] = True
+            settings.save(saved)
+            self.assertTrue(reading.plan(CORPUS["escalation"]).summarized)
+        finally:
+            settings.save(stored)
+
+    def test_summary_mode_survives_a_settings_reload(self):
+        stored = settings.load()
+        try:
+            saved = dict(stored)
+            saved["summary_mode"] = True
+            settings.save(saved)
+            self.assertTrue(settings.load()["summary_mode"])
+
+            saved["summary_mode"] = False
+            settings.save(saved)
+            self.assertFalse(settings.load()["summary_mode"])
+        finally:
+            settings.save(stored)
+
+    def test_summary_mode_defaults_to_off(self):
+        self.assertFalse(settings.DEFAULTS["summary_mode"])
 
 
 class ReadingPlanUnchanged(unittest.TestCase):

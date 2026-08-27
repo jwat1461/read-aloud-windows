@@ -21,6 +21,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 import global_reader
+import reading
 import settings
 import tray
 from global_reader import HOTKEYS, GlobalReader
@@ -80,6 +81,18 @@ def set_clipboard(hwnd, text=None, extra=()):
     finally:
         user32.CloseClipboard()
 
+# Comfortably past the 4-sentence / 60-word bypass, so summary mode engages.
+SUMMARY_FIXTURE = (
+    "The migration failed twice overnight before it finally finished. We are "
+    "blocked on the reporting rebuild until someone signs off on the schema. "
+    "The client has asked three separate times now and is threatening to ask "
+    "for a refund. Nobody has been able to reproduce the error on staging at "
+    "all. It costs $4000 a month to keep both environments alive while this "
+    "drags on. The deadline was Friday and it is already Tuesday afternoon. "
+    "Can we please get a decision today? Everything else in the release is "
+    "ready and waiting."
+)
+
 
 def pump(app, seconds, until=None):
     deadline = time.monotonic() + seconds
@@ -97,6 +110,7 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.app.update()
         pump(self.app, 6, lambda: bool(self.app.voice_box.cget("values")))
         self.app.prefs["auto_read_clipboard"] = False
+        self.app.prefs["summary_mode"] = False
         self.app.set_volume(12)
         self.app.set_rate(6)
         self.app.update()
@@ -105,6 +119,7 @@ class GlobalReaderBehaviour(unittest.TestCase):
         # Auto-read is shared, persisted state: never leave a test run with it
         # switched on, or the machine starts reading everything you copy.
         self.app.prefs["auto_read_clipboard"] = False
+        self.app.prefs["summary_mode"] = False
         self.app.prefs["auto_read_max_chars"] = settings.DEFAULTS["auto_read_max_chars"]
         self.app._on_close()
         self.assertFalse(self.app.engine.alive)
@@ -174,6 +189,46 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertIn("Ctrl+Alt+S", message)
         self.assertTrue(warning)
         self.assertIn("Ctrl+Alt+R", self.app.status_var.get())
+
+    def test_summary_mode_toggles_from_hotkey_and_tray_and_persists(self):
+        balloons = []
+        self.app.tray.notify = (
+            lambda title, message, warning=False: balloons.append(message)
+        )
+        self.app.prefs["summary_mode"] = False
+
+        self.app._handle_hotkey(global_reader.HOTKEY_SUMMARY)
+        self.assertTrue(self.app.prefs["summary_mode"])
+        self.assertTrue(settings.load()["summary_mode"])
+        self.assertTrue(self.app.tray.snapshot()["summary_mode"])
+        self.assertIn("summary", self.app.tray.tooltip_text().lower())
+        self.assertEqual(balloons, ["Summary mode on"])
+
+        self.app._handle_menu(tray.CMD_SUMMARY)
+        self.assertFalse(self.app.prefs["summary_mode"])
+        self.assertFalse(settings.load()["summary_mode"])
+        self.assertFalse(self.app.tray.snapshot()["summary_mode"])
+        self.assertEqual(balloons, ["Summary mode on", "Summary mode off"])
+
+    def test_summary_mode_off_reads_the_text_verbatim(self):
+        self.app.prefs["summary_mode"] = False
+        full = reading.plan(SUMMARY_FIXTURE, summary=False).sentences
+
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.assertEqual(self.app.pieces, full)
+        self.assertEqual(self.app.scope, "clipboard")
+        self.app.stop()
+
+    def test_summary_mode_on_reads_the_summary_and_says_so(self):
+        self.app.prefs["summary_mode"] = True
+        full = reading.plan(SUMMARY_FIXTURE, summary=False).sentences
+
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.assertLess(len(self.app.pieces), len(full), "nothing was summarized")
+        for piece in self.app.pieces:
+            self.assertIn(piece, full, "a sentence was invented")
+        self.assertEqual(self.app.scope, "clipboard summary")
+        self.app.stop()
 
     def test_a_second_copy_bows_out_and_leaves_the_hotkeys_alone(self):
         """Two copies would fight over the hotkeys, and the loser goes silent."""

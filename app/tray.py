@@ -79,6 +79,7 @@ CMD_STOP = 5
 CMD_QUIT = 6
 CMD_AUTO_READ = 7
 CMD_NEXT = 8
+CMD_SUMMARY = 9
 CMD_VOICE_BASE = 1000
 CMD_RATE_BASE = 2000
 CMD_VOLUME_BASE = 3000
@@ -230,6 +231,7 @@ class TrayBackend(threading.Thread):
             "state": "idle",
             "status": "",
             "auto_read": False,
+            "summary_mode": False,
             "queued": 0,
             "queue_dropped": False,
         }
@@ -293,6 +295,12 @@ class TrayBackend(threading.Thread):
             MF_STRING | (MF_CHECKED if snap.get("auto_read") else 0),
             CMD_AUTO_READ,
             "Auto-read clipboard\tCtrl+Alt+A",
+        )
+        user32.AppendMenuW(
+            menu,
+            MF_STRING | (MF_CHECKED if snap.get("summary_mode") else 0),
+            CMD_SUMMARY,
+            "Summary mode\tCtrl+Alt+M",
         )
         user32.AppendMenuW(
             menu,
@@ -418,6 +426,9 @@ class TrayBackend(threading.Thread):
             auto += f" · {queued} queued"
             if snap.get("queue_dropped"):
                 auto += " · oldest dropped"
+
+        if snap.get("summary_mode"):
+            auto += " \u00b7 summary"
 
         lines = [self.base_tooltip, auto]
         status = snap.get("status") or ""

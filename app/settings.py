@@ -16,6 +16,7 @@ DEFAULTS: dict = {
     "volume": 100,
     "auto_read_clipboard": False,
     "auto_read_max_chars": 20000,
+    "summary_mode": False,
 }
 
 SETTINGS_PATH = (
@@ -33,6 +34,7 @@ def load() -> dict:
         values.update({k: stored[k] for k in DEFAULTS if k in stored})
     # Hand-edited files are a fact of life; coerce rather than trust.
     values["auto_read_clipboard"] = bool(values["auto_read_clipboard"])
+    values["summary_mode"] = bool(values["summary_mode"])
     try:
         values["auto_read_max_chars"] = max(1, int(values["auto_read_max_chars"]))
     except (TypeError, ValueError):
