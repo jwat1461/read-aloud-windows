@@ -8,12 +8,26 @@ A window flashes on screen while these run. Speech happens at low volume.
 import time
 import unittest
 
+import reading
 import tts_app
 from tts_app import ReadAloudApp
 
 SAMPLE = (
     "The first sentence is short. The second sentence is a little longer than "
     "the first one.\n\nAnd this is a third, in its own paragraph."
+)
+
+
+# Past the 4-sentence / 60-word bypass, so summary mode actually engages.
+LONG_SAMPLE = (
+    "The migration failed twice overnight before it finally finished. We are "
+    "blocked on the reporting rebuild until someone signs off on the schema. "
+    "The client has asked three separate times now and is threatening to ask "
+    "for a refund. Nobody has been able to reproduce the error on staging at "
+    "all. It costs $4000 a month to keep both environments alive while this "
+    "drags on. The deadline was Friday and it is already Tuesday afternoon. "
+    "Can we please get a decision today? Everything else in the release is "
+    "ready and waiting."
 )
 
 
@@ -28,6 +42,134 @@ def pump(app, seconds, until=None):
     return until() if until else False
 
 
+class SummaryPane(unittest.TestCase):
+    """Summary mode in the desktop window: what the reading pane shows, and
+    that the original never goes anywhere."""
+
+    def setUp(self):
+        self.app = ReadAloudApp()
+        self.app.update()
+        pump(self.app, 10, lambda: bool(self.app.voice_box.cget("values")))
+        self.app.volume_var.set(12)
+        self.app._on_volume_change()
+        self.app.rate_var.set(8)
+        self.app._on_rate_change()
+        self.app.settings["summary_mode"] = False
+        self.app.update()
+
+    def tearDown(self):
+        self.app.settings["summary_mode"] = False
+        self.app._on_close()
+
+    def _pane(self):
+        return self.app.text.get("1.0", "end-1c")
+
+    def test_the_pane_shows_the_summary_and_the_source_holds_the_original(self):
+        self.app.settings["summary_mode"] = True
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+
+        self.app.read()
+        self.app.update()
+
+        pane = self._pane()
+        self.assertNotEqual(pane, LONG_SAMPLE, "the pane still shows the original")
+        self.assertEqual(self.app._source, LONG_SAMPLE)
+        self.assertEqual(self.app.source_box.get("1.0", "end-1c"), LONG_SAMPLE)
+
+        full = reading.plan(LONG_SAMPLE, summary=False).sentences
+        for _s, _e, piece in self.app.pieces:
+            self.assertIn(piece, full, "a sentence was invented")
+        self.app.stop()
+
+    def test_the_summary_spans_line_up_with_the_pane_for_highlighting(self):
+        self.app.settings["summary_mode"] = True
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.app.update()
+
+        pane = self._pane()
+        for start, end, piece in self.app.pieces:
+            self.assertEqual(pane[start:end], piece, "highlight would land wrong")
+        self.app.stop()
+
+    def test_the_source_section_starts_collapsed_and_opens_on_request(self):
+        self.app.settings["summary_mode"] = True
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.app.update()
+        self.app.stop()
+
+        self.assertFalse(self.app.source_open)
+        self.assertFalse(self.app.source_box.winfo_ismapped())
+        self.assertIn("Source", self.app.source_btn.cget("text"))
+
+        self.app.toggle_source()
+        self.app.update()
+        self.assertTrue(self.app.source_open)
+        self.assertTrue(self.app.source_box.winfo_ismapped())
+
+        self.app.toggle_source()
+        self.app.update()
+        self.assertFalse(self.app.source_open)
+        self.assertFalse(self.app.source_box.winfo_ismapped())
+
+    def test_restore_puts_the_original_back_in_the_pane(self):
+        self.app.settings["summary_mode"] = True
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.app.update()
+        self.app.stop()
+        self.assertNotEqual(self._pane(), LONG_SAMPLE)
+
+        self.app.restore_source()
+        self.app.update()
+        self.assertEqual(self._pane(), LONG_SAMPLE)
+        self.assertEqual(self.app._source, "")
+        self.assertFalse(self.app.source_frame.winfo_ismapped())
+
+    def test_summary_mode_off_leaves_the_pane_and_the_source_alone(self):
+        self.app.settings["summary_mode"] = False
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.app.update()
+
+        self.assertEqual(self._pane(), LONG_SAMPLE)
+        self.assertEqual(self.app._source, "")
+        self.assertFalse(self.app.source_frame.winfo_ismapped())
+        self.app.stop()
+
+    def test_a_bypass_changes_nothing_on_screen(self):
+        """Short text with the mode on must look exactly like the mode off."""
+        self.app.settings["summary_mode"] = True
+        self.app._set_text(SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.app.update()
+
+        self.assertEqual(self._pane(), SAMPLE)
+        self.assertEqual(self.app._source, "")
+        self.assertFalse(self.app.source_frame.winfo_ismapped())
+        self.app.stop()
+
+    def test_the_checkbox_and_the_setting_move_together(self):
+        self.app.summary_var.set(True)
+        self.app._on_summary_toggle()
+        self.assertTrue(self.app.settings["summary_mode"])
+        import settings as settings_module
+
+        self.assertTrue(settings_module.load()["summary_mode"])
+
+        self.app.summary_var.set(False)
+        self.app._on_summary_toggle()
+        self.assertFalse(self.app.settings["summary_mode"])
+        self.assertFalse(settings_module.load()["summary_mode"])
+
+
 class AppBehaviour(unittest.TestCase):
     def setUp(self):
         self.app = ReadAloudApp()
@@ -38,6 +180,7 @@ class AppBehaviour(unittest.TestCase):
         self.app._on_volume_change()
         self.app.rate_var.set(6)
         self.app._on_rate_change()
+        self.app.settings["summary_mode"] = False
         self.app.update()
 
     def tearDown(self):

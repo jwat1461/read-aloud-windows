@@ -230,6 +230,57 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertEqual(self.app.scope, "clipboard summary")
         self.app.stop()
 
+    def test_the_queue_holds_raw_text_and_summarizes_at_dequeue(self):
+        """Queued items are summarized when they come off the queue, not when
+        they go on: flipping the mode mid-queue must apply to what is still
+        waiting."""
+        self.app.prefs["summary_mode"] = True
+        self.app.set_rate(-2)
+        self.app.speak("A short item that is playing right now.", "clipboard")
+        self.app.toggle_pause()
+
+        self.app._enqueue_auto_read(SUMMARY_FIXTURE)
+        self.assertEqual(
+            self.app.auto_queue, [SUMMARY_FIXTURE], "the queue stored a summary"
+        )
+
+        self.app.engine.stop()
+        self.app._finish()
+        full = reading.plan(SUMMARY_FIXTURE, summary=False).sentences
+        self.assertLess(len(self.app.pieces), len(full), "dequeue did not summarize")
+        self.assertEqual(self.app.auto_queue, [])
+        self.app.stop()
+
+    def test_queue_order_survives_summarization(self):
+        self.app.prefs["summary_mode"] = True
+        self.app.set_rate(6)
+        spoken = self._record_spoken()
+
+        first = SUMMARY_FIXTURE
+        second = SUMMARY_FIXTURE.replace("migration", "overnight import")
+        self.app.speak("Playing first of all.", "clipboard")
+        self.app._enqueue_auto_read(first)
+        self.app._enqueue_auto_read(second)
+        self.assertEqual(self.app.auto_queue, [first, second])
+
+        self.assertTrue(
+            pump(self.app, 60, lambda: self.app.state_name == "idle" and not self.app.auto_queue),
+            "the queue never drained",
+        )
+        self.assertEqual(spoken, ["Playing first of all.", first, second])
+
+    def test_skip_drops_the_whole_summarized_item(self):
+        self.app.prefs["summary_mode"] = True
+        self.app.set_rate(-2)
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.assertGreater(len(self.app.pieces), 1, "need more than one sentence")
+        self.app._enqueue_auto_read("The item that comes after it.")
+
+        self.app._handle_hotkey(global_reader.HOTKEY_NEXT)
+        self.assertEqual(self.app.pieces, ["The item that comes after it."])
+        self.assertEqual(self.app.auto_queue, [])
+        self.app.stop()
+
     def test_a_second_copy_bows_out_and_leaves_the_hotkeys_alone(self):
         """Two copies would fight over the hotkeys, and the loser goes silent."""
         handle, _already = global_reader.claim_single_instance()

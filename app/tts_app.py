@@ -87,6 +87,10 @@ class ReadAloudApp(tk.Tk):
         self.scope = "document"
 
         self._build_style()
+        # The original a summary replaced, and whether its pane is open.
+        self._source = ""
+        self.source_open = False
+
         self._build_ui()
         self._bind_keys()
 
@@ -329,9 +333,50 @@ class ReadAloudApp(tk.Tk):
         self.text.tag_configure("speaking", background=HL_BG, foreground=HL_FG)
         self.text.bind("<<Modified>>", self._on_text_modified)
 
+        # --- source -------------------------------------------------------
+        # Only ever on screen when a summary is in the reading pane above it.
+        self.source_frame = ttk.Frame(root, style="Panel.TFrame", padding=(12, 8))
+        self.source_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.source_frame.columnconfigure(0, weight=1)
+        self.source_frame.grid_remove()
+
+        head = ttk.Frame(self.source_frame, style="Panel.TFrame")
+        head.grid(row=0, column=0, sticky="ew")
+        head.columnconfigure(1, weight=1)
+
+        self.source_btn = ttk.Button(
+            head, text="\u25b8  Source", width=14, command=self.toggle_source
+        )
+        self.source_btn.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            head,
+            text="the full text this summary was taken from",
+            style="PanelMuted.TLabel",
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Button(head, text="Restore", command=self.restore_source).grid(
+            row=0, column=2, sticky="e"
+        )
+
+        self.source_box = tk.Text(
+            self.source_frame,
+            wrap="word",
+            height=8,
+            bg=FIELD,
+            fg=MUTED,
+            font=FONT_TEXT,
+            relief="flat",
+            padx=12,
+            pady=10,
+            spacing1=2,
+            spacing3=6,
+        )
+        self.source_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.source_box.configure(state="disabled")
+        self.source_box.grid_remove()
+
         # --- controls -----------------------------------------------------
         ctrl = ttk.Frame(root, style="Panel.TFrame", padding=(14, 12))
-        ctrl.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ctrl.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         ctrl.columnconfigure(1, weight=3)
         ctrl.columnconfigure(4, weight=2)
 
@@ -378,7 +423,7 @@ class ReadAloudApp(tk.Tk):
 
         # --- status -------------------------------------------------------
         status = ttk.Frame(root)
-        status.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        status.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         status.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar(value="Ready")
@@ -456,6 +501,58 @@ class ReadAloudApp(tk.Tk):
         chars = len(content)
         self.count_var.set(f"{words:,} words · {chars:,} chars")
 
+    def _show_source(self, original: str) -> None:
+        """Park the original under the summary, collapsed."""
+        self._source = original
+        self.source_box.configure(state="normal")
+        self.source_box.delete("1.0", "end")
+        self.source_box.insert("1.0", original)
+        self.source_box.configure(state="disabled")
+        self.source_frame.grid()
+        self._collapse_source()
+
+    def _hide_source(self) -> None:
+        if not hasattr(self, "source_frame"):
+            return  # a file loaded before the window finished building
+        self._source = ""
+        self.source_frame.grid_remove()
+        self._collapse_source()
+
+    def _collapse_source(self) -> None:
+        self.source_open = False
+        self.source_box.grid_remove()
+        self.source_btn.configure(text="\u25b8  Source")
+
+    def toggle_source(self) -> None:
+        if not self._source:
+            return
+        self.source_open = not self.source_open
+        if self.source_open:
+            self.source_box.grid()
+            self.source_btn.configure(text="\u25be  Source")
+        else:
+            self._collapse_source()
+
+    def restore_source(self) -> None:
+        """Put the original back in the reading pane and forget the summary."""
+        if not self._source:
+            return
+        original = self._source
+        self._set_text(original)
+        self.status_var.set("Original restored")
+
+    def _swap_in_summary(self, summary: str, original: str) -> None:
+        """Show the summary in the reading pane, without touching playback.
+
+        _set_text() would do most of this but it stops the engine first, and
+        this runs on the way in to a read, not on the way out of one.
+        """
+        self._clear_highlight()
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", summary)
+        self._on_text_modified()
+        self._show_source(original)
+
     def _set_text(self, content: str) -> None:
         # Tk stores a literal \r, which would desync spoken text from highlight offsets.
         content = content.replace("\r\n", "\n").replace("\r", "\n")
@@ -463,6 +560,7 @@ class ReadAloudApp(tk.Tk):
         self.text.delete("1.0", "end")
         self.text.insert("1.0", content)
         self._on_text_modified()
+        self._hide_source()
 
     def paste_and_read(self) -> None:
         try:
@@ -501,6 +599,7 @@ class ReadAloudApp(tk.Tk):
         self.stop()
         self.text.delete("1.0", "end")
         self._on_text_modified()
+        self._hide_source()
         self.status_var.set("Ready")
 
     # ------------------------------------------------------------- playback
@@ -542,6 +641,12 @@ class ReadAloudApp(tk.Tk):
         if not self.pieces:
             self.status_var.set("Nothing to read")
             return
+
+        # A bypass reports summarized=False, so short text changes nothing here.
+        if plan.summarized:
+            self._swap_in_summary(plan.text, content)
+        else:
+            self._hide_source()
 
         self.index = 0
         self.state_name = "speaking"
