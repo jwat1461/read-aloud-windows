@@ -116,7 +116,7 @@ class SummaryPane(unittest.TestCase):
         self.assertFalse(self.app.source_open)
         self.assertFalse(self.app.source_box.winfo_ismapped())
 
-    def test_restore_puts_the_original_back_in_the_pane(self):
+    def test_read_full_text_puts_the_original_back_and_reads_all_of_it(self):
         self.app.settings["summary_mode"] = True
         self.app._set_text(LONG_SAMPLE)
         self.app.update()
@@ -125,11 +125,65 @@ class SummaryPane(unittest.TestCase):
         self.app.stop()
         self.assertNotEqual(self._pane(), LONG_SAMPLE)
 
-        self.app.restore_source()
+        self.app.read_full_text()
         self.app.update()
         self.assertEqual(self._pane(), LONG_SAMPLE)
         self.assertEqual(self.app._source, "")
         self.assertFalse(self.app.source_frame.winfo_ismapped())
+        self.assertEqual(
+            [p for _s, _e, p in self.app.pieces],
+            reading.plan(LONG_SAMPLE, summary=False).sentences,
+            "the full text was not what got read",
+        )
+        self.assertFalse(self.app.cue_pending, "a cue was armed for untrimmed text")
+        self.app.stop()
+
+    def _record_engine(self):
+        """What SAPI is actually handed. The cue is consumed by the first
+        utterance inside read(), so the flag is already gone by the time a test
+        could look at it -- the utterance is the only honest witness."""
+        uttered = []
+        original = self.app.engine.speak
+
+        def recording(text):
+            uttered.append(text)
+            original(text)
+
+        self.app.engine.speak = recording
+        return uttered
+
+    def test_the_cue_is_spoken_for_a_summary_and_not_for_a_bypass(self):
+        self.app.settings["summary_mode"] = True
+        uttered = self._record_engine()
+
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.assertTrue(uttered)
+        self.assertTrue(uttered[0].startswith(reading.CUE), uttered[0])
+        self.app.stop()
+
+        uttered.clear()
+        self.app._set_text(SAMPLE)  # too short: bypasses
+        self.app.update()
+        self.app.read()
+        self.assertTrue(uttered)
+        self.assertFalse(uttered[0].startswith(reading.CUE), "cued a bypass")
+        self.app.stop()
+
+    def test_the_cue_does_not_disturb_the_highlight_offsets(self):
+        """The cue is prefixed to the utterance, never inserted into pieces."""
+        self.app.settings["summary_mode"] = True
+        self.app._set_text(LONG_SAMPLE)
+        self.app.update()
+        self.app.read()
+        self.app.update()
+
+        pane = self.app.text.get("1.0", "end-1c")
+        for start, end, piece in self.app.pieces:
+            self.assertEqual(pane[start:end], piece)
+            self.assertNotIn(reading.CUE, piece)
+        self.app.stop()
 
     def test_summary_mode_off_leaves_the_pane_and_the_source_alone(self):
         self.app.settings["summary_mode"] = False

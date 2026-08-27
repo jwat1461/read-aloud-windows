@@ -281,6 +281,99 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertEqual(self.app.auto_queue, [])
         self.app.stop()
 
+    def _record_engine(self):
+        """Everything actually handed to SAPI, so the cue can be seen."""
+        uttered = []
+        original = self.app.engine.speak
+
+        def recording(text):
+            uttered.append(text)
+            original(text)
+
+        self.app.engine.speak = recording
+        return uttered
+
+    def test_the_summary_cue_is_spoken_before_a_summarized_item(self):
+        self.app.prefs["summary_mode"] = True
+        uttered = self._record_engine()
+
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.assertTrue(uttered)
+        self.assertTrue(
+            uttered[0].startswith(reading.CUE), f"no cue: {uttered[0]!r}"
+        )
+        self.assertIn(self.app.pieces[0], uttered[0])
+        self.app.stop()
+
+    def test_no_cue_is_spoken_for_text_that_was_not_trimmed(self):
+        self.app.prefs["summary_mode"] = True
+        uttered = self._record_engine()
+
+        short = (
+            "The build failed again this morning after the deploy. "
+            "Nobody can reproduce it. We are blocked until someone looks."
+        )
+        self.app.speak(short, "clipboard")
+        self.assertTrue(uttered)
+        self.assertFalse(
+            uttered[0].startswith(reading.CUE), "cued text it never trimmed"
+        )
+        self.app.stop()
+
+    def test_the_cue_is_spoken_once_not_before_every_sentence(self):
+        self.app.prefs["summary_mode"] = True
+        self.app.set_rate(8)
+        uttered = self._record_engine()
+
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.assertTrue(
+            pump(self.app, 45, lambda: self.app.state_name == "idle"),
+            "the summary never finished",
+        )
+        cued = [u for u in uttered if u.startswith(reading.CUE)]
+        self.assertEqual(len(cued), 1, uttered)
+
+    def test_read_full_source_reads_the_untrimmed_text_with_summary_on(self):
+        self.app.prefs["summary_mode"] = True
+        full = reading.plan(SUMMARY_FIXTURE, summary=False).sentences
+
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.assertLess(len(self.app.pieces), len(full), "nothing was summarized")
+        self.assertEqual(self.app.last_source, SUMMARY_FIXTURE)
+
+        self.app._handle_hotkey(global_reader.HOTKEY_FULL)
+        self.assertEqual(self.app.pieces, full, "Ctrl+Alt+F did not read it all")
+        self.assertEqual(self.app.scope, "full text")
+        self.assertFalse(self.app.cue_pending, "cued untrimmed text")
+        self.app.stop()
+
+    def test_read_full_source_works_with_summary_mode_off_too(self):
+        self.app.prefs["summary_mode"] = False
+        full = reading.plan(SUMMARY_FIXTURE, summary=False).sentences
+
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.app.stop()
+        self.app._handle_hotkey(global_reader.HOTKEY_FULL)
+        self.assertEqual(self.app.pieces, full)
+        self.app.stop()
+
+    def test_read_full_source_before_anything_was_read_says_so(self):
+        self.app._handle_hotkey(global_reader.HOTKEY_FULL)
+        self.assertEqual(self.app.state_name, "idle")
+        self.assertIn("nothing", self.app.status_var.get().lower())
+
+    def test_read_full_source_leaves_the_queue_where_it_was(self):
+        self.app.prefs["summary_mode"] = True
+        self.app.set_rate(-2)
+        self.app.speak(SUMMARY_FIXTURE, "clipboard")
+        self.app._enqueue_auto_read("Still waiting its turn.")
+
+        self.app._handle_hotkey(global_reader.HOTKEY_FULL)
+        self.assertEqual(
+            self.app.auto_queue, ["Still waiting its turn."], "the queue jumped"
+        )
+        self.app.stop()
+
     def test_a_second_copy_bows_out_and_leaves_the_hotkeys_alone(self):
         """Two copies would fight over the hotkeys, and the loser goes silent."""
         handle, _already = global_reader.claim_single_instance()

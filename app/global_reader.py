@@ -6,10 +6,11 @@ voice, speed and volume, or to stop whatever is being read.
     Ctrl+Alt+R   read the selected text — press again to stop
     Ctrl+Alt+C   read whatever is on the clipboard
     Ctrl+Alt+A   auto-read the clipboard, on / off
-    Ctrl+Alt+M   summary mode, on / off
+    Ctrl+Alt+S   summary mode, on / off
+    Ctrl+Alt+F   read the full untrimmed source of the current item
     Ctrl+Alt+N   skip to the next queued item
     Ctrl+Alt+P   pause / resume
-    Ctrl+Alt+S   stop
+    Ctrl+Alt+X   stop
 
 With auto-read on, anything that lands on the clipboard is queued and read in
 copy order. Content a password manager has marked private is skipped without
@@ -62,6 +63,7 @@ HOTKEY_STOP = 4
 HOTKEY_AUTO_READ = 5
 HOTKEY_NEXT = 6
 HOTKEY_SUMMARY = 7
+HOTKEY_FULL = 8
 
 _MODS = tray.MOD_CONTROL | tray.MOD_ALT | tray.MOD_NOREPEAT
 
@@ -70,9 +72,10 @@ HOTKEYS = {
     HOTKEY_CLIPBOARD: (_MODS, ord("C"), "Ctrl+Alt+C", "Read clipboard"),
     HOTKEY_AUTO_READ: (_MODS, ord("A"), "Ctrl+Alt+A", "Auto-read clipboard on/off"),
     HOTKEY_NEXT: (_MODS, ord("N"), "Ctrl+Alt+N", "Skip to next queued"),
-    HOTKEY_SUMMARY: (_MODS, ord("M"), "Ctrl+Alt+M", "Summary mode on/off"),
+    HOTKEY_SUMMARY: (_MODS, ord("S"), "Ctrl+Alt+S", "Summary mode on/off"),
+    HOTKEY_FULL: (_MODS, ord("F"), "Ctrl+Alt+F", "Read the full source"),
     HOTKEY_PAUSE: (_MODS, ord("P"), "Ctrl+Alt+P", "Pause / resume"),
-    HOTKEY_STOP: (_MODS, ord("S"), "Ctrl+Alt+S", "Stop"),
+    HOTKEY_STOP: (_MODS, ord("X"), "Ctrl+Alt+X", "Stop"),
 }
 
 
@@ -276,6 +279,7 @@ class GlobalReader(tk.Tk):
         self.pieces: list[str] = []
         self.index = 0
         self.scope = ""
+        self.cue_pending = False
         self.awaiting_speak_ack = False
         self._announcing = False
         self._closing = False
@@ -290,6 +294,8 @@ class GlobalReader(tk.Tk):
         self.auto_queue: list[str] = []
         self.queue_dropped = False
         self._last_auto_read: str | None = None
+        # The untrimmed text behind whatever is reading, for Ctrl+Alt+F.
+        self.last_source = ""
         self._own_clip_from: int | None = None
         self._own_clip_to: int | None = None
         self._paused_needs_restart = False
@@ -703,6 +709,18 @@ class GlobalReader(tk.Tk):
             else "Summary mode is off"
         )
 
+    def read_full_source(self) -> None:
+        """Ctrl+Alt+F. Works whether or not summary mode is on -- when it is
+        off this is simply a re-read, which is a reasonable thing to want."""
+        if not self.last_source.strip():
+            self._set_status("Nothing has been read yet")
+            return
+        if self.state_name != "idle":
+            self.engine.stop()
+            # advance=False: the queue keeps its place rather than jumping ahead.
+            self._finish(advance=False)
+        self.speak(self.last_source, "full text", summary=False)
+
     def skip_to_next(self) -> None:
         """Ctrl+Alt+N — drop what is playing and start the next queued item."""
         if self.state_name == "idle" and not self.auto_queue:
@@ -712,12 +730,16 @@ class GlobalReader(tk.Tk):
 
     # -------------------------------------------------------------- playback
 
-    def speak(self, text: str, scope: str) -> None:
-        plan = reading.plan(text, summary=bool(self.prefs["summary_mode"]))
+    def speak(self, text: str, scope: str, summary: bool | None = None) -> None:
+        if summary is None:
+            summary = bool(self.prefs["summary_mode"])
+        plan = reading.plan(text, summary=summary)
         if not plan:
             self._set_status("Nothing to read")
             return
+        self.last_source = plan.source
         self.pieces = plan.sentences
+        self.cue_pending = plan.summarized
         self.index = 0
         self.state_name = "speaking"
         self.scope = f"{scope} summary" if plan.summarized else scope
@@ -729,7 +751,14 @@ class GlobalReader(tk.Tk):
             self._finish()
             return
         self.awaiting_speak_ack = True
-        self.engine.speak(self.pieces[self.index])
+        spoken = self.pieces[self.index]
+        if self.cue_pending:
+            # Prefixed to the utterance, not inserted into `pieces`: a second
+            # engine.speak() would cancel the first, and a fake sentence would
+            # throw off every span behind it.
+            spoken = f"{reading.CUE} {spoken}"
+            self.cue_pending = False
+        self.engine.speak(spoken)
         status = f"Reading {self.scope} — sentence {self.index + 1} of {len(self.pieces)}"
         if self.auto_queue:
             status += f" · {len(self.auto_queue)} queued"
@@ -776,6 +805,7 @@ class GlobalReader(tk.Tk):
         self.state_name = "idle"
         self.pieces = []
         self.index = 0
+        self.cue_pending = False
         self.awaiting_speak_ack = False
         self._announcing = False
         self._paused_needs_restart = False
@@ -821,6 +851,8 @@ class GlobalReader(tk.Tk):
             self.skip_to_next()
         elif hotkey_id == HOTKEY_SUMMARY:
             self.toggle_summary_mode()
+        elif hotkey_id == HOTKEY_FULL:
+            self.read_full_source()
         elif hotkey_id == HOTKEY_PAUSE:
             self.toggle_pause()
         elif hotkey_id == HOTKEY_STOP:
@@ -839,6 +871,8 @@ class GlobalReader(tk.Tk):
             self.skip_to_next()
         elif command == tray.CMD_SUMMARY:
             self.toggle_summary_mode()
+        elif command == tray.CMD_FULL:
+            self.read_full_source()
         elif command == tray.CMD_PAUSE:
             self.toggle_pause()
         elif command == tray.CMD_STOP:

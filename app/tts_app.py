@@ -90,6 +90,7 @@ class ReadAloudApp(tk.Tk):
         # The original a summary replaced, and whether its pane is open.
         self._source = ""
         self.source_open = False
+        self.cue_pending = False
 
         self._build_ui()
         self._bind_keys()
@@ -353,7 +354,7 @@ class ReadAloudApp(tk.Tk):
             text="the full text this summary was taken from",
             style="PanelMuted.TLabel",
         ).grid(row=0, column=1, sticky="w", padx=(10, 0))
-        ttk.Button(head, text="Restore", command=self.restore_source).grid(
+        ttk.Button(head, text="Read full text", command=self.read_full_text).grid(
             row=0, column=2, sticky="e"
         )
 
@@ -533,13 +534,15 @@ class ReadAloudApp(tk.Tk):
         else:
             self._collapse_source()
 
-    def restore_source(self) -> None:
-        """Put the original back in the reading pane and forget the summary."""
-        if not self._source:
+    def read_full_text(self) -> None:
+        """The Source section's button, and the same action as Ctrl+Alt+F in the
+        tray reader: put the original back and read all of it."""
+        original = self._source or self.text.get("1.0", "end-1c")
+        if not original.strip():
             return
-        original = self._source
-        self._set_text(original)
-        self.status_var.set("Original restored")
+        if self._source:
+            self._set_text(original)
+        self.read(summary=False)
 
     def _swap_in_summary(self, summary: str, original: str) -> None:
         """Show the summary in the reading pane, without touching playback.
@@ -615,7 +618,7 @@ class ReadAloudApp(tk.Tk):
             int(self.text.count("1.0", end, "chars")[0]),
         )
 
-    def read(self) -> None:
+    def read(self, summary: bool | None = None) -> None:
         if self._closing:
             return  # autoplay timer can outlive a window closed straight away
         if self.state_name == "paused":
@@ -628,7 +631,8 @@ class ReadAloudApp(tk.Tk):
             return
 
         selection = self._selection_range()
-        summary = bool(self.settings["summary_mode"])
+        if summary is None:
+            summary = bool(self.settings["summary_mode"])
         if selection:
             start, end = selection
             plan = reading.plan(content[start:end], offset=start, summary=summary)
@@ -642,6 +646,7 @@ class ReadAloudApp(tk.Tk):
             self.status_var.set("Nothing to read")
             return
 
+        self.cue_pending = plan.summarized
         # A bypass reports summarized=False, so short text changes nothing here.
         if plan.summarized:
             self._swap_in_summary(plan.text, content)
@@ -660,6 +665,9 @@ class ReadAloudApp(tk.Tk):
         start, end, piece = self.pieces[self.index]
         self._highlight(start, end)
         self.awaiting_speak_ack = True
+        if self.cue_pending:
+            piece = f"{reading.CUE} {piece}"
+            self.cue_pending = False
         self.engine.speak(piece)
         if self.state_name == "paused":
             self.state_name = "speaking"
@@ -686,6 +694,7 @@ class ReadAloudApp(tk.Tk):
         self.state_name = "idle"
         self.pieces = []
         self.index = 0
+        self.cue_pending = False
         self.awaiting_speak_ack = False
         if self._restart_job is not None:
             self.after_cancel(self._restart_job)

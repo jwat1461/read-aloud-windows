@@ -25,6 +25,12 @@ from chunker import chunks
 # arithmetic rather than guesswork.
 JOIN = " "
 
+# Spoken before the first sentence of a summarized item, so a listener knows
+# text was cut rather than wondering why the message sounded so short. It is
+# prefixed to what the engine is handed, never added to `pieces`, so sentence
+# spans and highlighting stay pointing at real text.
+CUE = "Summary."
+
 
 @dataclass(frozen=True)
 class ReadingPlan:
