@@ -32,9 +32,9 @@ from ctypes import wintypes
 from pathlib import Path
 from tkinter import ttk
 
+import reading
 import settings
 import tray
-from chunker import chunks
 from speech_engine import SpeechEngine, SpeechError
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -693,11 +693,11 @@ class GlobalReader(tk.Tk):
     # -------------------------------------------------------------- playback
 
     def speak(self, text: str, scope: str) -> None:
-        pieces = [piece for _s, _e, piece in chunks(text)]
-        if not pieces:
+        plan = reading.plan(text)
+        if not plan:
             self._set_status("Nothing to read")
             return
-        self.pieces = pieces
+        self.pieces = plan.sentences
         self.index = 0
         self.state_name = "speaking"
         self.scope = scope

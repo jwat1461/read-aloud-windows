@@ -15,8 +15,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import reading
 import settings
-from chunker import chunks
 from speech_engine import SpeechEngine, SpeechError
 
 # ---------------------------------------------------------------- appearance
@@ -498,14 +498,13 @@ class ReadAloudApp(tk.Tk):
         selection = self._selection_range()
         if selection:
             start, end = selection
-            self.pieces = [
-                (s + start, e + start, t) for s, e, t in chunks(content[start:end])
-            ]
+            plan = reading.plan(content[start:end], offset=start)
             self.scope = "selection"
         else:
-            self.pieces = chunks(content)
+            plan = reading.plan(content)
             self.scope = "document"
 
+        self.pieces = plan.pieces
         if not self.pieces:
             self.status_var.set("Nothing to read")
             return
