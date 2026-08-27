@@ -89,6 +89,7 @@ def plan(
     engine: str | None = None,
     model: str | None = None,
     before_model=None,
+    source: str = "unknown",
 ) -> ReadingPlan:
     """Split `text` into the sentences to be spoken.
 
@@ -132,7 +133,20 @@ def plan(
             kept = _model_sentences(text, model, before_model)
             fell_back = kept is None
         if kept is None:
-            kept = summarize.summarize(text, rules)
+            kept = summarize.summarize(text, rules, source=source)
+        else:
+            # The model answered, so summarize() never ran and never logged.
+            # Record the run anyway, or an ollama session leaves no trail.
+            summarize.log_run({
+                "timestamp": summarize.now_iso(),
+                "source": source,
+                "sentence_count": len(spans),
+                "word_count": len(summarize._WORD.findall(text.lower())),
+                "bypass_reason": None,
+                "k": len(kept),
+                "engine": "ollama",
+                "picked": [],
+            })
 
         if kept != [piece for _s, _e, piece in spans]:
             summary_text, pieces = _stitch(kept)

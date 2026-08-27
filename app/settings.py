@@ -29,6 +29,7 @@ DEFAULTS: dict = {
     "summary_engine": "extractive",
     "summary_model": "llama3.2",
     "summary_host": LOCAL_HOST,
+    "log_sentence_text": False,
 }
 
 SETTINGS_PATH = (
@@ -53,6 +54,7 @@ def load() -> dict:
     # Hand-edited files are a fact of life; coerce rather than trust.
     values["auto_read_clipboard"] = bool(values["auto_read_clipboard"])
     values["summary_mode"] = bool(values["summary_mode"])
+    values["log_sentence_text"] = bool(values["log_sentence_text"])
 
     if values["summary_engine"] not in SUMMARY_ENGINES:
         _reject(f"summary_engine {values['summary_engine']!r} is not one of "

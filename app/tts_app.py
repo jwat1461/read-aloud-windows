@@ -625,6 +625,7 @@ class ReadAloudApp(tk.Tk):
             summary=summary,
             engine=self.settings["summary_engine"],
             model=self.settings["summary_model"],
+            source="app",
             before_model=lambda: self.engine.speak(reading.WORKING),
         )
 

@@ -31,6 +31,24 @@ LONG_SAMPLE = (
 )
 
 
+_REAL_LOG = None
+
+
+def setUpModule():
+    """Keep the score log out of the user's real %APPDATA% while testing."""
+    global _REAL_LOG
+    import tempfile
+    from pathlib import Path as _Path
+    import summarize as _s
+    _REAL_LOG = _s.LOG_PATH
+    _s.LOG_PATH = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+
+def tearDownModule():
+    import summarize as _s
+    _s.LOG_PATH = _REAL_LOG
+
+
 def pump(app, seconds, until=None):
     """Run the Tk event loop for a while, stopping early if `until` becomes true."""
     deadline = time.monotonic() + seconds
@@ -55,11 +73,35 @@ class SummaryPane(unittest.TestCase):
         self.app.rate_var.set(8)
         self.app._on_rate_change()
         self.app.settings["summary_mode"] = False
+        self._fail_on_swallowed_callbacks()
         self.app.update()
 
     def tearDown(self):
         self.app.settings["summary_mode"] = False
         self.app._on_close()
+        self._assert_no_swallowed_callbacks()
+
+    def _fail_on_swallowed_callbacks(self):
+        """Make Tk stop eating exceptions.
+
+        An exception raised inside an after() callback goes to
+        report_callback_exception, which prints it and carries on. In this suite
+        that turned a stale test double into a queue that simply stopped
+        draining, with nothing in the failure to say why. Collected here and
+        asserted in tearDown, so the next one is a named failure instead.
+        """
+        self.callback_errors = []
+        self.app.report_callback_exception = (
+            lambda exc, value, tb: self.callback_errors.append((exc, value))
+        )
+
+    def _assert_no_swallowed_callbacks(self):
+        if getattr(self, "callback_errors", None):
+            exc, value = self.callback_errors[0]
+            raise AssertionError(
+                f"{len(self.callback_errors)} exception(s) were raised inside Tk "
+                f"callbacks and swallowed; first was {exc.__name__}: {value}"
+            )
 
     def _pane(self):
         return self.app.text.get("1.0", "end-1c")

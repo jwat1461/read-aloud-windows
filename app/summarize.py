@@ -29,7 +29,12 @@ lines — and inside otherwise-ordinary prose those same shapes should never be
 sentence too long.
 
 Vocabulary, negators, window and weights all live in
-%APPDATA%\\ReadAloud\\summary_rules.json so they can be tuned without a rebuild.
+%APPDATA%\\ReadAloud\\summary_rules.json so they can be tuned without a rebuild,
+and every call writes one line to summary_log.jsonl beside it saying what was
+picked and what each signal contributed — because tuning weights against text
+you cannot see afterwards is guesswork. The sentences themselves are not logged
+unless you ask for them: scores and indices are enough to see why something won,
+and are not a copy of everything you have ever put on the clipboard.
 """
 
 from __future__ import annotations
@@ -39,13 +44,21 @@ import math
 import os
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from chunker import chunks
 
-RULES_PATH = (
-    Path(os.environ.get("APPDATA") or Path.home()) / "ReadAloud" / "summary_rules.json"
-)
+_HOME = Path(os.environ.get("APPDATA") or Path.home()) / "ReadAloud"
+
+RULES_PATH = _HOME / "summary_rules.json"
+
+# One JSON line per summarize() call. Scores without the sentences they scored
+# are the point: they are enough to see why something won and tune the weights,
+# and they are not a copy of everything you put on the clipboard.
+LOG_PATH = _HOME / "summary_log.jsonl"
+LOG_ROTATED = _HOME / "summary_log.1.jsonl"
+LOG_MAX_BYTES = 5 * 1024 * 1024
 
 # Below either of these a summary is worse than the text it replaces.
 MIN_SENTENCES = 4
@@ -191,6 +204,92 @@ def save_rules(rules: dict, path: Path | None = None) -> None:
         pass  # a read-only profile is not worth crashing over
 
 
+# ------------------------------------------------------------------- logging
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _rotate(path: Path, rotated: Path) -> None:
+    if path.exists() and path.stat().st_size >= LOG_MAX_BYTES:
+        path.replace(rotated)  # os.replace: overwrites the previous rotation
+
+
+def log_run(
+    record: dict,
+    path: Path | None = None,
+    rotated: Path | None = None,
+) -> None:
+    """Append one line. Never raises: a summary must not fail over its diary."""
+    path = LOG_PATH if path is None else path
+    rotated = (
+        (path.with_name("summary_log.1.jsonl") if path is not LOG_PATH else LOG_ROTATED)
+        if rotated is None
+        else rotated
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate(path, rotated)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _log_sentence_text() -> bool:
+    """Off unless settings.json says otherwise. Imported here rather than at the
+    top so this module stays importable on its own, as the tests use it."""
+    try:
+        import settings
+
+        return bool(settings.load()["log_sentence_text"])
+    except Exception:
+        return False
+
+
+def _record(
+    text: str,
+    sentences: list[str],
+    reason: str | None,
+    chosen: list[int],
+    scores: list[float],
+    breakdown: list[dict],
+    keep: int | None,
+    source: str,
+    with_text: bool | None = None,
+) -> dict:
+    if with_text is None:
+        with_text = _log_sentence_text()
+
+    picked = []
+    for index in chosen:
+        signals = breakdown[index]
+        entry = {
+            "index": index,
+            "score": round(scores[index], 6),
+            "pain": round(signals["pain"], 6),
+            "negation_hits": signals["negation_hits"],
+            "question": round(signals["question"], 6),
+            "number": round(signals["number"], 6),
+            "position": round(signals["position"], 6),
+            "frequency": round(signals.get("frequency", 0.0), 6),
+        }
+        if with_text:
+            entry["text"] = sentences[index]
+        picked.append(entry)
+
+    return {
+        "timestamp": now_iso(),
+        "source": source,
+        "sentence_count": len(sentences),
+        "word_count": len(_WORD.findall(text.lower())),
+        "bypass_reason": reason,
+        "k": keep,
+        "picked": picked,
+    }
+
+
 # --------------------------------------------------------------- tokenising
 
 
@@ -318,7 +417,12 @@ def _negated_positions(tokens: list[str], negations: frozenset, window: int) -> 
     return blocked
 
 
-def _cue_scores(sentences: list[str], rules: dict) -> list[float]:
+def _signals(sentences: list[str], rules: dict) -> list[dict]:
+    """Each sentence's cue signals, kept apart rather than summed.
+
+    Split out so the log can say *why* a sentence won, not just that it did.
+    Tuning weights against a single blended number is guesswork.
+    """
     weights = rules["weights"]
     pain = frozenset(rules["pain_words"])
     negations = frozenset(rules["negations"])
@@ -328,29 +432,43 @@ def _cue_scores(sentences: list[str], rules: dict) -> list[float]:
     # no paragraph structure and behaves the same on a wall of text.
     edge = max(1, total // 5)
 
-    scores = []
+    breakdown = []
     for index, sentence in enumerate(sentences):
         tokens = _words(sentence)
         blocked = _negated_positions(tokens, negations, window)
-        hits = sum(
-            1
-            for position, token in enumerate(tokens)
-            if _matches(token, pain) and position not in blocked
-        )
-        # Saturating, so one furious sentence cannot own the whole summary.
-        score = weights["pain_word"] * math.sqrt(hits)
+        hits = 0
+        suppressed = 0
+        for position, token in enumerate(tokens):
+            if not _matches(token, pain):
+                continue
+            if position in blocked:
+                suppressed += 1
+            else:
+                hits += 1
 
-        if "?" in sentence:
-            score += weights["question"]
-        if _FIGURE.search(sentence):
-            score += weights["figure"]
         if index < edge:
-            score += weights["first_paragraph"]
+            position_score = weights["first_paragraph"]
         elif index >= total - edge:
-            score += weights["last_paragraph"]
+            position_score = weights["last_paragraph"]
+        else:
+            position_score = 0.0
 
-        scores.append(score)
-    return scores
+        breakdown.append({
+            # Saturating, so one furious sentence cannot own the summary.
+            "pain": weights["pain_word"] * math.sqrt(hits),
+            "negation_hits": suppressed,
+            "question": weights["question"] if "?" in sentence else 0.0,
+            "number": weights["figure"] if _FIGURE.search(sentence) else 0.0,
+            "position": position_score,
+        })
+    return breakdown
+
+
+def _cue_scores(sentences: list[str], rules: dict) -> list[float]:
+    return [
+        s["pain"] + s["question"] + s["number"] + s["position"]
+        for s in _signals(sentences, rules)
+    ]
 
 
 def _luhn_scores(sentences: list[str]) -> list[float]:
@@ -390,36 +508,68 @@ def _normalise(scores: list[float]) -> list[float]:
     return [(s - low) / (high - low) for s in scores]
 
 
-def rank_sentences(sentences: list[str], rules: dict | None = None) -> list[float]:
-    """The blended score per sentence, in sentence order."""
+def score_detail(
+    sentences: list[str], rules: dict | None = None
+) -> tuple[list[float], list[dict]]:
+    """Blended scores, and the signals each one was built from."""
     if not sentences:
-        return []
+        return [], []
     rules = load_rules() if rules is None else rules
     weights = rules["weights"]
 
-    cue = _normalise(_cue_scores(sentences, rules))
-    luhn = _normalise(_luhn_scores(sentences))
-    return [
-        weights["cue_blend"] * c + weights["luhn_blend"] * l
-        for c, l in zip(cue, luhn)
-    ]
+    breakdown = _signals(sentences, rules)
+    cue = _normalise(
+        [s["pain"] + s["question"] + s["number"] + s["position"] for s in breakdown]
+    )
+    frequency = _normalise(_luhn_scores(sentences))
+
+    totals = []
+    for signals, c, f in zip(breakdown, cue, frequency):
+        signals["frequency"] = f
+        totals.append(weights["cue_blend"] * c + weights["luhn_blend"] * f)
+    return totals, breakdown
 
 
-def summarize(text: str, rules: dict | None = None) -> list[str]:
+def rank_sentences(sentences: list[str], rules: dict | None = None) -> list[float]:
+    """The blended score per sentence, in sentence order."""
+    return score_detail(sentences, rules)[0]
+
+
+def summarize(
+    text: str,
+    rules: dict | None = None,
+    source: str = "unknown",
+    log_path: Path | None = None,
+) -> list[str]:
     """Return the sentences worth hearing, in the order they were written.
 
     Anything that should be read as-is comes back whole. Everything else comes
     back as the top-scoring eligible sentences, re-sorted into source order so
     the summary still reads forwards.
+
+    Every call writes one line to the log, bypasses included: "it decided not to
+    bother, and here is which rule said so" is exactly as useful when tuning as
+    a list of picks.
     """
     sentences = [piece for _s, _e, piece in chunks(text)]
-    if not sentences or bypass_reason(text, sentences) is not None:
+    reason = bypass_reason(text, sentences) if sentences else "empty"
+
+    if reason is not None:
+        log_run(
+            _record(text, sentences, reason, [], [], [], None, source), log_path
+        )
         return sentences
 
     eligible = eligible_indexes(sentences)
-    scores = rank_sentences(sentences, rules)
+    scores, breakdown = score_detail(sentences, rules)
     keep = target_count(len(eligible))
 
     # Index breaks ties, so an even score never depends on sort implementation.
     order = sorted(eligible, key=lambda i: (-scores[i], i))
-    return [sentences[i] for i in sorted(order[:keep])]
+    chosen = sorted(order[:keep])
+
+    log_run(
+        _record(text, sentences, None, chosen, scores, breakdown, keep, source),
+        log_path,
+    )
+    return [sentences[i] for i in chosen]

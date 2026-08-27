@@ -665,7 +665,7 @@ class GlobalReader(tk.Tk):
         if not self.auto_queue:
             self.queue_dropped = False
             return False
-        self.speak(self.auto_queue.pop(0), "clipboard")
+        self.speak(self.auto_queue.pop(0), "clipboard", source="queue")
         return True
 
     def toggle_auto_read(self) -> None:
@@ -738,12 +738,19 @@ class GlobalReader(tk.Tk):
 
     # -------------------------------------------------------------- playback
 
-    def speak(self, text: str, scope: str, summary: bool | None = None) -> None:
+    def speak(
+        self,
+        text: str,
+        scope: str,
+        summary: bool | None = None,
+        source: str = "hotkey",
+    ) -> None:
         if summary is None:
             summary = bool(self.prefs["summary_mode"])
         plan = reading.plan(
             text,
             summary=summary,
+            source=source,
             engine=self.prefs["summary_engine"],
             model=self.prefs["summary_model"],
             # Only ever called when a model is about to be asked, so the wait

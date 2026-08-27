@@ -159,6 +159,33 @@ count from the next read. No rebuild.
 | `cue_blend` | 0.6 | How much the above counts against… |
 | `luhn_blend` | 0.4 | …term frequency after stopword removal |
 
+**Seeing why.** Every summary appends one JSON line to
+`%APPDATA%\ReadAloud\summary_log.jsonl` — when it ran, where the text came
+from (`hotkey`, `queue`, `app`), how many sentences and words it saw, which
+bypass rule fired if any, `k`, and for each sentence it kept: its index, its
+total score, and what every signal contributed.
+
+```json
+{"bypass_reason": null, "k": 2, "picked": [
+   {"index": 2, "score": 0.602843, "pain": 1.0, "negation_hits": 0,
+    "question": 0.0, "number": 0.0, "position": 0.0, "frequency": 0.707107}],
+ "sentence_count": 8, "source": "hotkey", "word_count": 87,
+ "timestamp": "2026-08-27T15:09:03+00:00"}
+```
+
+That is enough to tune against: if the wrong sentence keeps winning, the line
+says whether it won on `pain`, on `frequency`, or on `position`, and you change
+that weight rather than guessing. `negation_hits` counts pain words the window
+suppressed, so you can watch the negation rule doing its job.
+
+**The sentences themselves are not logged.** Scores and indices are all you
+need to tune, and they are not a copy of everything you have ever put on the
+clipboard. Set `"log_sentence_text": true` in `settings.json` while you are
+actively tuning, and turn it back off — that is the only way text reaches the
+file. Bypasses are logged too, so "it read that one verbatim" is never a
+mystery. The file rotates to `summary_log.1.jsonl` at 5 MB, and a log that
+cannot be written never breaks a read.
+
 `negations` and `negation_window` (3) are in the same file. A pain word within
 the window after a negator does not count, so *"no errors"* and *"not broken"*
 score neutral instead of shouting. Plurals are folded, so `error` catches
@@ -342,12 +369,12 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet     # no sound, no
 powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DOM suite
 ```
 
-191 tests across eight suites:
+201 tests across eight suites:
 
 | Suite | Tests | What it covers |
 |---|---|---|
 | `chunker` | 11 | Sentence splitting: punctuation, paragraphs, long runs, unicode |
-| `summary` | 36 | The extractive summarizer: bypasses, negation windows, determinism, the rules file, the corpus snapshot |
+| `summary` | 48 | The extractive summarizer: bypasses, negation windows, determinism, the rules file and its migration, the score log, the corpus snapshot |
 | `model` | 29 | The optional Ollama tier against a real local stub server: request shape, warm-up, every failure mode |
 | `parity` | 5 | The Python and JavaScript chunkers produce identical sentences |
 | `engine` | 11 | Live round trip against the PowerShell SAPI server, including WAV output |
@@ -383,7 +410,7 @@ app/
   speech_server.ps1  the SAPI process: speak, pause, stop, save WAV
   chunker.py         text -> sentences (with offsets, for highlighting)
   reading.py         the one place text becomes what the engine is handed
-  summarize.py       extractive pain-point summary, deterministic, no model
+  summarize.py       extractive pain-point summary, plus the score log
   local_model.py     optional Ollama tier, 127.0.0.1 only, fails soft
   settings.py        shared preferences
 
@@ -431,11 +458,11 @@ dropdown. Then run `python app\tts_app.py` from a terminal to see any error.
 balloon by the clock names it at startup and the window lists it too. Also check
 the target app is not running as administrator.
 
-**Summary mode reads out something useless.** Open
-`%APPDATA%\ReadAloud\summary_rules.json` and add the words your own trouble
-uses to `pain_words`, or raise `pain_word` above 1.0 so vocabulary outweighs
-term frequency. `Ctrl+Alt+F` reads the full text whenever the summary missed
-something.
+**Summary mode reads out something useless.** Look at the last line of
+`%APPDATA%\ReadAloud\summary_log.jsonl`: it says which signal won. Then either
+add the words your own trouble uses to `pain_words` in `summary_rules.json`,
+or move the weight the log is blaming. `Ctrl+Alt+F` reads the full text
+whenever the summary missed something.
 
 **No W icon by the clock.** Windows 11 hides new tray icons: click the `^` next
 to the clock and drag the W out onto the taskbar.

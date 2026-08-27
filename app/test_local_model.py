@@ -20,6 +20,24 @@ import settings
 import summarize
 import test_summary
 
+_REAL_LOG = None
+
+
+def setUpModule():
+    """Keep the score log out of the user's real %APPDATA% while testing."""
+    global _REAL_LOG
+    import tempfile
+    from pathlib import Path as _Path
+    import summarize as _s
+    _REAL_LOG = _s.LOG_PATH
+    _s.LOG_PATH = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+
+def tearDownModule():
+    import summarize as _s
+    _s.LOG_PATH = _REAL_LOG
+
+
 LONG_TEXT = test_summary.CORPUS["escalation"]
 
 MODEL_REPLY = (

@@ -117,6 +117,21 @@ def sentences_of(text):
     return [piece for _s, _e, piece in reading.plan(text, summary=False).pieces]
 
 
+_REAL_LOG = None
+
+
+def setUpModule():
+    """Point the log at a scratch file. Without this the suite would append
+    thousands of lines to the user's real summary_log.jsonl."""
+    global _REAL_LOG
+    _REAL_LOG = summarize.LOG_PATH
+    summarize.LOG_PATH = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+
+def tearDownModule():
+    summarize.LOG_PATH = _REAL_LOG
+
+
 def fresh_rules():
     return summarize.load_rules(Path(tempfile.mkdtemp()) / "rules.json")
 
@@ -437,6 +452,158 @@ class RulesFile(unittest.TestCase):
         finally:
             socket.socket = real
         self.assertEqual(opened, [])
+
+
+class ScoreLog(unittest.TestCase):
+    """One line per call, saying why -- without keeping the text."""
+
+    KEYS = {
+        "timestamp", "source", "sentence_count", "word_count",
+        "bypass_reason", "k", "picked",
+    }
+    SIGNALS = {
+        "index", "score", "pain", "negation_hits",
+        "question", "number", "position", "frequency",
+    }
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+    def _lines(self):
+        return [
+            json.loads(line)
+            for line in self.log.read_text("utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_one_call_writes_exactly_one_line_with_no_sentence_text(self):
+        summarize.summarize(
+            CORPUS["escalation"], self.rules, source="hotkey", log_path=self.log
+        )
+        lines = self._lines()
+        self.assertEqual(len(lines), 1, lines)
+
+        record = lines[0]
+        self.assertEqual(set(record), self.KEYS)
+        self.assertEqual(record["source"], "hotkey")
+        self.assertIsNone(record["bypass_reason"])
+        self.assertEqual(
+            record["sentence_count"], len(sentences_of(CORPUS["escalation"]))
+        )
+        self.assertEqual(record["word_count"], words_in(CORPUS["escalation"]))
+        self.assertEqual(record["k"], len(record["picked"]))
+
+        for entry in record["picked"]:
+            self.assertEqual(set(entry), self.SIGNALS, "unexpected keys in a pick")
+            self.assertNotIn("text", entry)
+
+        # The strongest form of the promise: no sentence of the source appears
+        # anywhere in the line, however the record might be shaped.
+        raw = self.log.read_text("utf-8")
+        for sentence in sentences_of(CORPUS["escalation"]):
+            self.assertNotIn(sentence.strip(), raw, "the log kept the text")
+
+    def test_each_call_adds_exactly_one_more_line(self):
+        for count in range(1, 4):
+            summarize.summarize(
+                CORPUS["meeting"], self.rules, source="queue", log_path=self.log
+            )
+            self.assertEqual(len(self._lines()), count)
+
+    def test_a_bypass_is_logged_too_and_says_which_rule_fired(self):
+        for text in (SHORT_THREE_SENTENCES, CODE_FIXTURE, URL_FIXTURE, LIST_FIXTURE):
+            summarize.summarize(text, self.rules, source="hotkey", log_path=self.log)
+
+        records = self._lines()
+        self.assertEqual(len(records), 4)
+        self.assertEqual(
+            [r["bypass_reason"] for r in records],
+            ["too few sentences", "code", "url", "list"],
+        )
+        for record in records:
+            self.assertIsNone(record["k"])
+            self.assertEqual(record["picked"], [])
+
+    def test_the_signals_add_up_to_what_was_scored(self):
+        """The log has to be worth tuning against, so the numbers in it must be
+        the numbers that actually decided the outcome."""
+        summarize.summarize(
+            CORPUS["escalation"], self.rules, source="hotkey", log_path=self.log
+        )
+        record = self._lines()[0]
+
+        sentences = sentences_of(CORPUS["escalation"])
+        scores, breakdown = summarize.score_detail(sentences, self.rules)
+        for entry in record["picked"]:
+            index = entry["index"]
+            self.assertAlmostEqual(entry["score"], scores[index], places=5)
+            self.assertAlmostEqual(entry["pain"], breakdown[index]["pain"], places=5)
+            self.assertEqual(entry["negation_hits"], breakdown[index]["negation_hits"])
+            self.assertAlmostEqual(
+                entry["frequency"], breakdown[index]["frequency"], places=5
+            )
+
+    def test_negation_hits_counts_what_the_window_suppressed(self):
+        sentences = sentences_of(NEGATION_FIXTURE)
+        _scores, breakdown = summarize.score_detail(sentences, self.rules)
+        no_errors = next(i for i, s in enumerate(sentences) if "no errors" in s)
+        self.assertGreater(
+            breakdown[no_errors]["negation_hits"], 0, "nothing was suppressed"
+        )
+        self.assertEqual(breakdown[no_errors]["pain"], 0.0)
+
+    def test_sentence_text_appears_only_when_it_is_asked_for(self):
+        sentences = sentences_of(CORPUS["escalation"])
+        signals = [{"pain": 1.0, "negation_hits": 0, "question": 0.0,
+                    "number": 0.0, "position": 0.0, "frequency": 0.5}]
+
+        without = summarize._record(
+            CORPUS["escalation"], sentences, None, [0], [0.5], signals, 2,
+            "hotkey", with_text=False,
+        )
+        self.assertNotIn("text", without["picked"][0])
+
+        with_text = summarize._record(
+            CORPUS["escalation"], sentences, None, [0], [0.5], signals, 2,
+            "hotkey", with_text=True,
+        )
+        self.assertEqual(with_text["picked"][0]["text"], sentences[0])
+
+    def test_the_default_setting_keeps_text_out(self):
+        self.assertFalse(settings.DEFAULTS["log_sentence_text"])
+        stored = settings.load()
+        try:
+            settings.save(dict(stored, log_sentence_text=False))
+            self.assertFalse(summarize._log_sentence_text())
+            settings.save(dict(stored, log_sentence_text=True))
+            self.assertTrue(summarize._log_sentence_text())
+        finally:
+            settings.save(stored)
+
+    def test_the_log_rotates_at_five_megabytes(self):
+        rotated = self.log.with_name("summary_log.1.jsonl")
+        self.log.write_text("x" * summarize.LOG_MAX_BYTES, "utf-8")
+        self.assertGreaterEqual(self.log.stat().st_size, summarize.LOG_MAX_BYTES)
+
+        summarize.summarize(
+            CORPUS["escalation"], self.rules, source="hotkey", log_path=self.log
+        )
+        self.assertTrue(rotated.exists(), "nothing was rotated")
+        self.assertEqual(len(self._lines()), 1, "the new file should start fresh")
+        self.assertGreaterEqual(rotated.stat().st_size, summarize.LOG_MAX_BYTES)
+
+    def test_the_cap_is_five_megabytes(self):
+        self.assertEqual(summarize.LOG_MAX_BYTES, 5 * 1024 * 1024)
+
+    def test_a_log_that_cannot_be_written_does_not_break_the_summary(self):
+        """A summary must not fail over its own diary."""
+        unwritable = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+        unwritable.mkdir()  # a directory where the file should be
+        picked = summarize.summarize(
+            CORPUS["escalation"], self.rules, source="hotkey", log_path=unwritable
+        )
+        self.assertTrue(picked)
 
 
 class Snapshot(unittest.TestCase):

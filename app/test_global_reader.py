@@ -94,6 +94,24 @@ SUMMARY_FIXTURE = (
 )
 
 
+_REAL_LOG = None
+
+
+def setUpModule():
+    """Keep the score log out of the user's real %APPDATA% while testing."""
+    global _REAL_LOG
+    import tempfile
+    from pathlib import Path as _Path
+    import summarize as _s
+    _REAL_LOG = _s.LOG_PATH
+    _s.LOG_PATH = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+
+def tearDownModule():
+    import summarize as _s
+    _s.LOG_PATH = _REAL_LOG
+
+
 def pump(app, seconds, until=None):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -109,6 +127,7 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.app = GlobalReader()
         self.app.update()
         pump(self.app, 6, lambda: bool(self.app.voice_box.cget("values")))
+        self._fail_on_swallowed_callbacks()
         self.app.prefs["auto_read_clipboard"] = False
         self.app.prefs["summary_mode"] = False
         self.app.set_volume(12)
@@ -130,8 +149,32 @@ class GlobalReaderBehaviour(unittest.TestCase):
         # thread", tens of tests later and nowhere near the cause.
         self.app = None
         gc.collect()
+        self._assert_no_swallowed_callbacks()
 
     # ------------------------------------------------------------- helpers
+
+    def _fail_on_swallowed_callbacks(self):
+        """Make Tk stop eating exceptions.
+
+        An exception raised inside an after() callback goes to
+        report_callback_exception, which prints it and carries on. In this suite
+        that turned a stale test double into a queue that simply stopped
+        draining, with nothing in the failure to say why. Collected here and
+        asserted in tearDown, so the next one is a named failure instead.
+        """
+        self.callback_errors = []
+        self.app.report_callback_exception = (
+            lambda exc, value, tb: self.callback_errors.append((exc, value))
+        )
+
+    def _assert_no_swallowed_callbacks(self):
+        if getattr(self, "callback_errors", None):
+            exc, value = self.callback_errors[0]
+            raise AssertionError(
+                f"{len(self.callback_errors)} exception(s) were raised inside Tk "
+                f"callbacks and swallowed; first was {exc.__name__}: {value}"
+            )
+
 
     def _clipboard(self, text=None, extra=()):
         set_clipboard(self.app.winfo_id(), text, extra)
@@ -146,9 +189,13 @@ class GlobalReaderBehaviour(unittest.TestCase):
         spoken = []
         original = self.app.speak
 
-        def recording(text, scope):
+        # *args/**kwargs deliberately: a stand-in pinned to today's parameter
+        # list fails as a TypeError inside a Tk after() callback, where it is
+        # printed and swallowed, and the only symptom is a queue that quietly
+        # stops draining. Ask how that was found.
+        def recording(text, *args, **kwargs):
             spoken.append(text)
-            original(text, scope)
+            original(text, *args, **kwargs)
 
         self.app.speak = recording
         return spoken
