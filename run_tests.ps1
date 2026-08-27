@@ -3,8 +3,9 @@
     Run the whole Read Aloud test suite.
 
 .DESCRIPTION
-    Four suites:
+    Six suites:
       chunker  - sentence splitting (fast, silent)
+      summary  - the extractive summarizer and its rules file (fast, silent)
       engine   - live round trip against the PowerShell SAPI server (makes sound)
       app      - drives the real Tk window (a window flashes; makes sound)
       global   - the OS-wide hotkey reader (registers real hotkeys; makes sound)
@@ -12,7 +13,7 @@
 
     Speech during the tests plays at low volume.
 
-    A sixth suite covers the extension's DOM mapping and needs a real browser.
+    A seventh suite covers the extension's DOM mapping and needs a real browser.
     Run it with -Browser, which serves the extension folder and opens the
     harness in your default browser; results render on the page.
 
@@ -60,6 +61,7 @@ $appDir = Join-Path $root 'app'
 
 $suites = @(
     @{ Name = 'chunker'; Dir = $appDir; Args = @('-m', 'unittest', 'test_chunker', '-v'); Silent = $true }
+    @{ Name = 'summary'; Dir = $appDir; Args = @('-m', 'unittest', 'test_summary', '-v'); Silent = $true }
     @{ Name = 'parity'; Dir = $root; Args = @('tools\test_parity.py', '-v'); Silent = $true }
     @{ Name = 'engine'; Dir = $appDir; Args = @('-m', 'unittest', 'test_engine', '-v'); Silent = $false }
     @{ Name = 'app'; Dir = $appDir; Args = @('-m', 'unittest', 'test_app', '-v'); Silent = $false }

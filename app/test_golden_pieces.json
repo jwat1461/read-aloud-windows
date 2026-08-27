@@ -1,0 +1,476 @@
+{
+  "01_escalation": {
+    "pieces": [
+      "The migration ran overnight and failed twice before it finished.",
+      "We are\nblocked on the reporting rebuild until someone signs off on the schema.",
+      "The\nclient has asked three times now and is threatening to ask for a refund.",
+      "Nobody has been able to reproduce the error on staging.",
+      "It costs $4000 a month\nto keep both environments alive while this drags on.",
+      "The deadline was Friday\nand it is now Tuesday.",
+      "Can we get a decision today?",
+      "Everything else in the\nrelease is ready and waiting."
+    ],
+    "spans": [
+      [
+        0,
+        64
+      ],
+      [
+        65,
+        143
+      ],
+      [
+        144,
+        220
+      ],
+      [
+        221,
+        276
+      ],
+      [
+        277,
+        352
+      ],
+      [
+        353,
+        399
+      ],
+      [
+        400,
+        428
+      ],
+      [
+        429,
+        481
+      ]
+    ],
+    "text": "The migration ran overnight and failed twice before it finished. We are\nblocked on the reporting rebuild until someone signs off on the schema. The\nclient has asked three times now and is threatening to ask for a refund.\nNobody has been able to reproduce the error on staging. It costs $4000 a month\nto keep both environments alive while this drags on. The deadline was Friday\nand it is now Tuesday. Can we get a decision today? Everything else in the\nrelease is ready and waiting."
+  },
+  "02_meeting_minutes": {
+    "pieces": [
+      "Attendance was steady through the quarter.",
+      "The Tuesday group has grown a\nlittle and the Thursday one has held level.",
+      "Two people asked about transport,\nwhich we still cannot help with.",
+      "The venue put its rate up in March and the\nincrease is not sustainable past the summer.",
+      "We are late filing the annual\nreturn and the deadline has already passed once.",
+      "The treasurer is away until\nthe end of the month.",
+      "Refreshments continue to be donated.",
+      "We should decide\nabout the venue before September."
+    ],
+    "spans": [
+      [
+        0,
+        42
+      ],
+      [
+        43,
+        116
+      ],
+      [
+        117,
+        183
+      ],
+      [
+        184,
+        271
+      ],
+      [
+        272,
+        350
+      ],
+      [
+        351,
+        400
+      ],
+      [
+        401,
+        437
+      ],
+      [
+        438,
+        488
+      ]
+    ],
+    "text": "Attendance was steady through the quarter. The Tuesday group has grown a\nlittle and the Thursday one has held level. Two people asked about transport,\nwhich we still cannot help with. The venue put its rate up in March and the\nincrease is not sustainable past the summer. We are late filing the annual\nreturn and the deadline has already passed once. The treasurer is away until\nthe end of the month. Refreshments continue to be donated. We should decide\nabout the venue before September."
+  },
+  "03_release_notes": {
+    "pieces": [
+      "This release adds a tray icon with voice, speed and volume controls.",
+      "It fixes\nDOM offset clamping in the extension.",
+      "It fixes TTS error storms that could\nfill the log.",
+      "Stale timers no longer fire after a window is closed.",
+      "The\nclipboard is now restored after a synthetic copy.",
+      "Sentence highlighting\nscrolls into view.",
+      "Nothing in this release changes the settings file format.",
+      "The parity suite is unchanged."
+    ],
+    "spans": [
+      [
+        0,
+        68
+      ],
+      [
+        69,
+        115
+      ],
+      [
+        116,
+        166
+      ],
+      [
+        167,
+        220
+      ],
+      [
+        221,
+        274
+      ],
+      [
+        275,
+        315
+      ],
+      [
+        316,
+        373
+      ],
+      [
+        374,
+        404
+      ]
+    ],
+    "text": "This release adds a tray icon with voice, speed and volume controls. It fixes\nDOM offset clamping in the extension. It fixes TTS error storms that could\nfill the log. Stale timers no longer fire after a window is closed. The\nclipboard is now restored after a synthetic copy. Sentence highlighting\nscrolls into view. Nothing in this release changes the settings file format.\nThe parity suite is unchanged."
+  },
+  "04_plain_prose": {
+    "pieces": [
+      "The garden looks well this year.",
+      "The roses came back after the frost and the\nhedge has thickened up nicely.",
+      "We moved the bench to the far corner where it\ncatches the afternoon.",
+      "The path needs weeding but it can wait.",
+      "Next spring we\nmight put in a second bed along the fence.",
+      "There is a blackbird nesting in the\nivy again.",
+      "It sings from the shed roof most evenings.",
+      "The apples should be\nready by the end of the month."
+    ],
+    "spans": [
+      [
+        0,
+        32
+      ],
+      [
+        33,
+        107
+      ],
+      [
+        108,
+        176
+      ],
+      [
+        177,
+        216
+      ],
+      [
+        217,
+        274
+      ],
+      [
+        275,
+        321
+      ],
+      [
+        322,
+        364
+      ],
+      [
+        365,
+        416
+      ]
+    ],
+    "text": "The garden looks well this year. The roses came back after the frost and the\nhedge has thickened up nicely. We moved the bench to the far corner where it\ncatches the afternoon. The path needs weeding but it can wait. Next spring we\nmight put in a second bed along the fence. There is a blackbird nesting in the\nivy again. It sings from the shed roof most evenings. The apples should be\nready by the end of the month."
+  },
+  "05_paragraphs": {
+    "pieces": [
+      "First paragraph, one sentence only.",
+      "Second paragraph opens here.",
+      "It runs to two sentences.",
+      "Third paragraph closes the piece."
+    ],
+    "spans": [
+      [
+        0,
+        35
+      ],
+      [
+        37,
+        65
+      ],
+      [
+        66,
+        91
+      ],
+      [
+        93,
+        126
+      ]
+    ],
+    "text": "First paragraph, one sentence only.\n\nSecond paragraph opens here. It runs to two sentences.\n\nThird paragraph closes the piece."
+  },
+  "06_abbreviations": {
+    "pieces": [
+      "Dr.",
+      "Adeyemi signed off at 4 p.m.",
+      "on Tue.",
+      "The invoice from Acme Ltd.",
+      "was for\n$1,240.50 excl.",
+      "VAT.",
+      "Mr.",
+      "Okafor disputes it.",
+      "See appendix A.2 for the\nbreakdown.",
+      "It has not been resolved."
+    ],
+    "spans": [
+      [
+        0,
+        3
+      ],
+      [
+        4,
+        32
+      ],
+      [
+        33,
+        40
+      ],
+      [
+        41,
+        67
+      ],
+      [
+        68,
+        91
+      ],
+      [
+        92,
+        96
+      ],
+      [
+        97,
+        100
+      ],
+      [
+        101,
+        120
+      ],
+      [
+        121,
+        156
+      ],
+      [
+        157,
+        182
+      ]
+    ],
+    "text": "Dr. Adeyemi signed off at 4 p.m. on Tue. The invoice from Acme Ltd. was for\n$1,240.50 excl. VAT. Mr. Okafor disputes it. See appendix A.2 for the\nbreakdown. It has not been resolved."
+  },
+  "07_questions": {
+    "pieces": [
+      "Why did the job fail?",
+      "Was anyone paged?",
+      "The runbook says to restart the\nworker, but nobody did.",
+      "Can we agree who owns this before Friday?",
+      "It cannot\nwait another sprint."
+    ],
+    "spans": [
+      [
+        0,
+        21
+      ],
+      [
+        22,
+        39
+      ],
+      [
+        40,
+        95
+      ],
+      [
+        96,
+        137
+      ],
+      [
+        138,
+        168
+      ]
+    ],
+    "text": "Why did the job fail? Was anyone paged? The runbook says to restart the\nworker, but nobody did. Can we agree who owns this before Friday? It cannot\nwait another sprint."
+  },
+  "08_unicode": {
+    "pieces": [
+      "El proceso falló otra vez — nadie sabe por qué.",
+      "La fecha límite era el\nviernes…",
+      "y seguimos bloqueados.",
+      "«No podemos continuar así», dijo el cliente.",
+      "Coût estimé : 4 000 € par mois.",
+      "Ça ne peut pas durer."
+    ],
+    "spans": [
+      [
+        0,
+        47
+      ],
+      [
+        48,
+        79
+      ],
+      [
+        80,
+        102
+      ],
+      [
+        103,
+        147
+      ],
+      [
+        148,
+        179
+      ],
+      [
+        180,
+        201
+      ]
+    ],
+    "text": "El proceso falló otra vez — nadie sabe por qué. La fecha límite era el\nviernes… y seguimos bloqueados. «No podemos continuar así», dijo el cliente.\nCoût estimé : 4 000 € par mois. Ça ne peut pas durer."
+  },
+  "09_long_run": {
+    "pieces": [
+      "this is a deliberately long stretch of text with no sentence ending\npunctuation at all which exists purely so the chunker has to fall back on its\nmaximum length rule and break at a word boundary somewhere sensible rather\nthan handing the speech engine one enormous utterance that",
+      "cannot be paused or\nstopped or highlighted in any useful way and which would also take a very long\ntime to finish reading out loud if anybody actually let it get that far"
+    ],
+    "spans": [
+      [
+        0,
+        279
+      ],
+      [
+        280,
+        450
+      ]
+    ],
+    "text": "this is a deliberately long stretch of text with no sentence ending\npunctuation at all which exists purely so the chunker has to fall back on its\nmaximum length rule and break at a word boundary somewhere sensible rather\nthan handing the speech engine one enormous utterance that cannot be paused or\nstopped or highlighted in any useful way and which would also take a very long\ntime to finish reading out loud if anybody actually let it get that far"
+  },
+  "10_lists_and_numbers": {
+    "pieces": [
+      "Three things went wrong.",
+      "1.",
+      "The nightly build timed out after 45 minutes.",
+      "2.",
+      "The cache was 80% cold on restart.",
+      "3.",
+      "Two customers hit the 500 error.",
+      "Total\ndowntime was 3 hours 12 minutes.",
+      "The cost is roughly £900."
+    ],
+    "spans": [
+      [
+        0,
+        24
+      ],
+      [
+        25,
+        27
+      ],
+      [
+        28,
+        73
+      ],
+      [
+        74,
+        76
+      ],
+      [
+        77,
+        111
+      ],
+      [
+        112,
+        114
+      ],
+      [
+        115,
+        147
+      ],
+      [
+        148,
+        186
+      ],
+      [
+        187,
+        212
+      ]
+    ],
+    "text": "Three things went wrong. 1. The nightly build timed out after 45 minutes. 2.\nThe cache was 80% cold on restart. 3. Two customers hit the 500 error. Total\ndowntime was 3 hours 12 minutes. The cost is roughly £900."
+  },
+  "11_quotes": {
+    "pieces": [
+      "\"We cannot ship this,\" she said.",
+      "\"Not on Friday.\"",
+      "The team agreed.",
+      "\"Then it\nslips,\" he replied, \"and we tell them today.\"",
+      "Nobody argued with that."
+    ],
+    "spans": [
+      [
+        0,
+        32
+      ],
+      [
+        33,
+        49
+      ],
+      [
+        50,
+        66
+      ],
+      [
+        67,
+        121
+      ],
+      [
+        122,
+        146
+      ]
+    ],
+    "text": "\"We cannot ship this,\" she said. \"Not on Friday.\" The team agreed. \"Then it\nslips,\" he replied, \"and we tell them today.\" Nobody argued with that."
+  },
+  "12_mixed_whitespace": {
+    "pieces": [
+      "Leading whitespace here.",
+      "A tab follows the first sentence.",
+      "Then a newline and more text.",
+      "Two blank lines above this one.",
+      "Trailing spaces after this."
+    ],
+    "spans": [
+      [
+        3,
+        27
+      ],
+      [
+        28,
+        61
+      ],
+      [
+        65,
+        94
+      ],
+      [
+        100,
+        131
+      ],
+      [
+        134,
+        161
+      ]
+    ],
+    "text": "   Leading whitespace here.\tA tab follows the first sentence.\n   Then a newline and more text.\n\n\n   Two blank lines above this one.   Trailing spaces after this.   "
+  }
+}
