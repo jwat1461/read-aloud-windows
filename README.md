@@ -75,9 +75,14 @@ way. From then on, in **any** application:
 | `Ctrl+Alt+R` | Read the selected text — **press again to stop** |
 | `Ctrl+Alt+C` | Read whatever is on the clipboard |
 | `Ctrl+Alt+A` | Auto-read the clipboard — on / off |
+| `Ctrl+Alt+S` | Summary mode — on / off |
+| `Ctrl+Alt+F` | Read the full untrimmed source of the current item |
 | `Ctrl+Alt+N` | Skip to the next queued item |
 | `Ctrl+Alt+P` | Pause / resume |
-| `Ctrl+Alt+S` | Stop (also empties the auto-read queue) |
+| `Ctrl+Alt+X` | Stop (also empties the auto-read queue) |
+
+> `Ctrl+Alt+X` stops, not `Ctrl+Alt+S`. Summary mode took `S`; stop moved to
+> `X` in the same change.
 
 ### Auto-read the clipboard
 
@@ -116,6 +121,75 @@ costs a password.
 **While it is on it reads everything you copy**, so turn it off before copying
 anything you would rather not hear out loud.
 
+### Summary mode
+
+Press `Ctrl+Alt+S`, or tick **Summary mode** in the tray menu, and text stops
+being read out in full. What you hear instead is the handful of sentences that
+carry the problem: what failed, what is blocked, what is late, what costs money,
+and what someone is being asked to decide. It applies to `Ctrl+Alt+R` reads and
+to auto-read clipboard items alike, and it is off by default.
+
+Every summarized item is announced with a single spoken word, **"Summary"**, so
+you always know text was cut rather than wondering why a message sounded so
+short. `Ctrl+Alt+F` reads the full untrimmed source of whatever is playing or
+was last played, and works with the mode off too, where it is simply a re-read.
+
+Nothing is written. Sentences are **chosen**, never generated, so every word you
+hear appeared in the text you copied — which is a promise a language model
+cannot make, and the reason the default engine is not one.
+
+Some things are read as they arrived, with no cue: anything under four sentences
+or sixty words, source code, a bare URL, and a list of short lines. Inside
+ordinary prose, a code line, a URL or a bullet is never *chosen* either, because
+a summary that reads out a link is worse than one sentence too long.
+
+**Tuning it.** The vocabulary and the weights live in
+`%APPDATA%\ReadAloud\summary_rules.json`, written with defaults the first time
+summary mode runs. Add words to `pain_words` for whatever your own trouble
+sounds like — a project name, a client, a system that is always down — and they
+count from the next read. No rebuild.
+
+| Weight | Default | What it does |
+|---|---|---|
+| `pain_word` | 1.0 | Per pain word, square-rooted so one furious sentence cannot own the summary |
+| `question` | 0.8 | The sentence asks something |
+| `figure` | 0.7 | A number with a unit or a currency |
+| `first_paragraph` | 0.25 | Opening nudge — small, because this is email, not news copy |
+| `last_paragraph` | 0.2 | Closing nudge |
+| `cue_blend` | 0.6 | How much the above counts against… |
+| `luhn_blend` | 0.4 | …term frequency after stopword removal |
+
+`negations` and `negation_window` (3) are in the same file. A pain word within
+the window after a negator does not count, so *"no errors"* and *"not broken"*
+score neutral instead of shouting. Plurals are folded, so `error` catches
+`errors`.
+
+The same input always produces the same output. There is no randomness, no
+clock, and no graph ranking — TextRank and its relatives order by node insertion
+and sum floats non-associatively, so near-tied sentences can swap places between
+runs, which would make the whole thing untestable.
+
+### Summary mode with a local model (optional, off)
+
+If you run [Ollama](https://ollama.com) locally, summary mode can hand the text
+to it instead. Set `summary_engine` to `"ollama"` in `settings.json`;
+`summary_model` defaults to `llama3.2`, and `qwen2.5:3b` is a smaller
+alternative. The model is asked for the pain points as at most eight short
+spoken sentences, at temperature 0 and seed 0, and is preloaded once per session
+so the first summary is not paying the load cost with you waiting. **"Summarizing"**
+is spoken before the request, so the wait is not dead air.
+
+If Ollama is not running, times out, or answers with nonsense, the extractive
+summarizer takes over silently and you find out on your next toggle, when the
+balloon says *"Summary mode on (local model unavailable, using extractive)"*.
+
+This talks to `127.0.0.1` and nothing else. `summary_host` exists only so that
+any other value can be rejected and logged — there is no configuration that
+turns this into a network call. The request is synchronous: with the model
+resident it returns in well under a second, but a cold or wedged one can hold
+the window for up to the 20-second read timeout. That is the cost of the opt-in
+tier, and the reason the default is a summarizer that cannot stall at all.
+
 ### The tray icon
 
 **Right-click the W by the clock** to change things without opening anything:
@@ -124,7 +198,8 @@ anything you would rather not hear out loud.
 - **Speed** — Very slow · Slow · Normal · Fast · Faster · Fastest
 - **Volume** — Mute · 25% · 50% · 75% · 100%
 - **Auto-read clipboard** — tick it and every copy is read; `Ctrl+Alt+A`
-- Read selection · Read clipboard · Pause · Skip to next · **Stop reading**
+- **Summary mode** — tick it and you hear the pain points only; `Ctrl+Alt+S`
+- Read selection · Read clipboard · Read full text · Pause · Skip to next · **Stop reading**
 - Open Read Aloud · Quit
 
 Left-click the icon to open the window, which has the same voice dropdown plus
@@ -267,16 +342,25 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet     # no sound, no
 powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DOM suite
 ```
 
-104 tests across six suites:
+191 tests across eight suites:
 
 | Suite | Tests | What it covers |
 |---|---|---|
 | `chunker` | 11 | Sentence splitting: punctuation, paragraphs, long runs, unicode |
+| `summary` | 36 | The extractive summarizer: bypasses, negation windows, determinism, the rules file, the corpus snapshot |
+| `model` | 29 | The optional Ollama tier against a real local stub server: request shape, warm-up, every failure mode |
 | `parity` | 5 | The Python and JavaScript chunkers produce identical sentences |
 | `engine` | 11 | Live round trip against the PowerShell SAPI server, including WAV output |
-| `app` | 16 | Drives the real Tk window: playback, highlighting, seeking, settings |
-| `global` | 43 | Real system hotkeys and tray icon, menu commands, clipboard capture, auto-read and its queue, single-instance guard |
+| `app` | 25 | Drives the real Tk window: playback, highlighting, seeking, settings, the summary pane |
+| `global` | 56 | Real system hotkeys and tray icon, menu commands, clipboard capture, auto-read and its queue, single-instance guard, summary mode |
 | `dom` | 18 | Extension text extraction, DOM range mapping and highlighting, in Chrome |
+
+`summary` and `model` are silent and need nothing running: the Ollama tests
+start their own HTTP server on 127.0.0.1 and point the client at it, so the
+connection, both timeouts and the JSON handling are genuinely exercised rather
+than mocked. The corpus snapshot in `app/test_summary_snapshot.json` records
+what the summarizer picks and fails on any drift; regenerate it deliberately
+with `python toolsesnapshot.py` and read the diff before committing it.
 
 The `engine`, `app` and `global` suites make sound (at low volume) and briefly
 open windows, because they exercise the real speech engine rather than a mock.
@@ -298,6 +382,9 @@ app/
   speech_engine.py   talks to the PowerShell server over stdin/stdout
   speech_server.ps1  the SAPI process: speak, pause, stop, save WAV
   chunker.py         text -> sentences (with offsets, for highlighting)
+  reading.py         the one place text becomes what the engine is handed
+  summarize.py       extractive pain-point summary, deterministic, no model
+  local_model.py     optional Ollama tier, 127.0.0.1 only, fails soft
   settings.py        shared preferences
 
 extension/
@@ -343,6 +430,12 @@ dropdown. Then run `python app\tts_app.py` from a terminal to see any error.
 **`Ctrl+Alt+R` does nothing.** Another program already owns that combination. A
 balloon by the clock names it at startup and the window lists it too. Also check
 the target app is not running as administrator.
+
+**Summary mode reads out something useless.** Open
+`%APPDATA%\ReadAloud\summary_rules.json` and add the words your own trouble
+uses to `pain_words`, or raise `pain_word` above 1.0 so vocabulary outweighs
+term frequency. `Ctrl+Alt+F` reads the full text whenever the summary missed
+something.
 
 **No W icon by the clock.** Windows 11 hides new tray icons: click the `^` next
 to the clock and drag the W out onto the taskbar.

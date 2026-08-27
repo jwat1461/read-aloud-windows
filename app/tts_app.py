@@ -618,6 +618,16 @@ class ReadAloudApp(tk.Tk):
             int(self.text.count("1.0", end, "chars")[0]),
         )
 
+    def _plan(self, text: str, summary: bool, offset: int = 0):
+        return reading.plan(
+            text,
+            offset=offset,
+            summary=summary,
+            engine=self.settings["summary_engine"],
+            model=self.settings["summary_model"],
+            before_model=lambda: self.engine.speak(reading.WORKING),
+        )
+
     def read(self, summary: bool | None = None) -> None:
         if self._closing:
             return  # autoplay timer can outlive a window closed straight away
@@ -635,10 +645,10 @@ class ReadAloudApp(tk.Tk):
             summary = bool(self.settings["summary_mode"])
         if selection:
             start, end = selection
-            plan = reading.plan(content[start:end], offset=start, summary=summary)
+            plan = self._plan(content[start:end], summary, offset=start)
             self.scope = "selection"
         else:
-            plan = reading.plan(content, summary=summary)
+            plan = self._plan(content, summary)
             self.scope = "document"
 
         self.pieces = plan.pieces

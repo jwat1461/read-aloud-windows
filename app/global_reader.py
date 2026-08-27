@@ -296,6 +296,9 @@ class GlobalReader(tk.Tk):
         self._last_auto_read: str | None = None
         # The untrimmed text behind whatever is reading, for Ctrl+Alt+F.
         self.last_source = ""
+        # Set when an Ollama summary had to fall back; reported on the next
+        # flip rather than interrupting the read that discovered it.
+        self.model_unavailable = False
         self._own_clip_from: int | None = None
         self._own_clip_to: int | None = None
         self._paused_needs_restart = False
@@ -700,9 +703,14 @@ class GlobalReader(tk.Tk):
         on = not self.prefs["summary_mode"]
         self.prefs["summary_mode"] = on
         settings.save(self.prefs)
-        self.tray.notify(
-            "Read Aloud Anywhere", "Summary mode on" if on else "Summary mode off"
-        )
+
+        if not on:
+            message = "Summary mode off"
+        elif self.model_unavailable:
+            message = "Summary mode on (local model unavailable, using extractive)"
+        else:
+            message = "Summary mode on"
+        self.tray.notify("Read Aloud Anywhere", message)
         self._set_status(
             "Summary mode is on — reads the pain points, not the whole thing"
             if on
@@ -733,7 +741,17 @@ class GlobalReader(tk.Tk):
     def speak(self, text: str, scope: str, summary: bool | None = None) -> None:
         if summary is None:
             summary = bool(self.prefs["summary_mode"])
-        plan = reading.plan(text, summary=summary)
+        plan = reading.plan(
+            text,
+            summary=summary,
+            engine=self.prefs["summary_engine"],
+            model=self.prefs["summary_model"],
+            # Only ever called when a model is about to be asked, so the wait
+            # is never dead air and an extractive read never says this.
+            before_model=lambda: self.engine.speak(reading.WORKING),
+        )
+        if plan.fell_back:
+            self.model_unavailable = True
         if not plan:
             self._set_status("Nothing to read")
             return

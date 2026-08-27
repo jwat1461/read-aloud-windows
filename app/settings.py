@@ -8,7 +8,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+
+# The only host the local-model tier may ever talk to. Not a default: a rule.
+LOCAL_HOST = "127.0.0.1"
+SUMMARY_ENGINES = ("extractive", "ollama")
+
+# Anything rejected while loading, so the app can show it rather than the user
+# wondering why a hand-edited file did nothing.
+warnings: list[str] = []
 
 DEFAULTS: dict = {
     "voice": "",
@@ -17,6 +26,9 @@ DEFAULTS: dict = {
     "auto_read_clipboard": False,
     "auto_read_max_chars": 20000,
     "summary_mode": False,
+    "summary_engine": "extractive",
+    "summary_model": "llama3.2",
+    "summary_host": LOCAL_HOST,
 }
 
 SETTINGS_PATH = (
@@ -24,7 +36,13 @@ SETTINGS_PATH = (
 )
 
 
+def _reject(message: str) -> None:
+    warnings.append(message)
+    print(f"ReadAloud settings: {message}", file=sys.stderr)
+
+
 def load() -> dict:
+    warnings.clear()
     values = dict(DEFAULTS)
     try:
         stored = json.loads(SETTINGS_PATH.read_text("utf-8"))
@@ -35,6 +53,20 @@ def load() -> dict:
     # Hand-edited files are a fact of life; coerce rather than trust.
     values["auto_read_clipboard"] = bool(values["auto_read_clipboard"])
     values["summary_mode"] = bool(values["summary_mode"])
+
+    if values["summary_engine"] not in SUMMARY_ENGINES:
+        _reject(f"summary_engine {values['summary_engine']!r} is not one of "
+                f"{SUMMARY_ENGINES}; using 'extractive'")
+        values["summary_engine"] = "extractive"
+
+    # The promise is no network calls. A configurable host would quietly turn
+    # this into one, so the setting exists only to be checked.
+    if values["summary_host"] != LOCAL_HOST:
+        _reject(f"summary_host {values['summary_host']!r} rejected: the local "
+                f"model tier only ever talks to {LOCAL_HOST}")
+        values["summary_host"] = LOCAL_HOST
+
+    values["summary_model"] = str(values["summary_model"]) or DEFAULTS["summary_model"]
     try:
         values["auto_read_max_chars"] = max(1, int(values["auto_read_max_chars"]))
     except (TypeError, ValueError):

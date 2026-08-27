@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import local_model
 import settings
 import summarize
 from chunker import chunks
@@ -31,6 +32,10 @@ JOIN = " "
 # spans and highlighting stay pointing at real text.
 CUE = "Summary."
 
+# Said before a model request, which is the only path here that can make anyone
+# wait. The extractive path is instant and gets no such warning.
+WORKING = "Summarizing."
+
 
 @dataclass(frozen=True)
 class ReadingPlan:
@@ -45,6 +50,8 @@ class ReadingPlan:
     source: str
     pieces: list[tuple[int, int, str]] = field(default_factory=list)
     summarized: bool = False
+    engine: str = "extractive"
+    fell_back: bool = False
 
     @property
     def sentences(self) -> list[str]:
@@ -64,11 +71,24 @@ def _stitch(sentences: list[str]) -> tuple[str, list[tuple[int, int, str]]]:
     return JOIN.join(sentences), pieces
 
 
+def _model_sentences(text: str, model: str, before) -> list[str] | None:
+    """The Ollama tier, or None when it could not oblige."""
+    try:
+        if before is not None:
+            before()
+        return local_model.summarize(text, model)
+    except local_model.Unavailable:
+        return None
+
+
 def plan(
     text: str,
     offset: int = 0,
     summary: bool | None = None,
     rules: dict | None = None,
+    engine: str | None = None,
+    model: str | None = None,
+    before_model=None,
 ) -> ReadingPlan:
     """Split `text` into the sentences to be spoken.
 
@@ -79,18 +99,50 @@ def plan(
 
     `summary` overrides the stored setting; leaving it None reads the setting,
     which is the safety net rather than the usual path, since both apps hold the
-    preference in memory already.
+    preference in memory already. `engine` and `model` work the same way.
+
+    `before_model` is called immediately before an Ollama request and not at all
+    otherwise, so a caller can say "Summarizing" out loud without having to work
+    out for itself whether the model is going to be asked.
+
+    The Ollama request is synchronous. With the model resident -- which is what
+    the warm-up is for -- it returns in well under a second; the 20-second read
+    timeout is the ceiling on a cold or wedged one, and the window is
+    unresponsive for that time. That is the price of the opt-in tier, and the
+    reason the default is a summarizer that cannot stall at all.
     """
     spans = chunks(text)
     if summary is None:
         summary = bool(settings.load()["summary_mode"])
 
     if summary and spans:
-        kept = summarize.summarize(text, rules)
+        stored = None
+        if engine is None or model is None:
+            stored = settings.load()
+        if engine is None:
+            engine = stored["summary_engine"]
+        if model is None:
+            model = stored["summary_model"]
+
+        kept = None
+        fell_back = False
+        # Bypass first: code, a URL and short text are no better through a
+        # model, and there is no reason to make anyone wait to learn that.
+        if summarize.bypass_reason(text) is None and engine == "ollama":
+            kept = _model_sentences(text, model, before_model)
+            fell_back = kept is None
+        if kept is None:
+            kept = summarize.summarize(text, rules)
+
         if kept != [piece for _s, _e, piece in spans]:
             summary_text, pieces = _stitch(kept)
             return ReadingPlan(
-                text=summary_text, source=text, pieces=pieces, summarized=True
+                text=summary_text,
+                source=text,
+                pieces=pieces,
+                summarized=True,
+                engine="extractive" if fell_back or engine != "ollama" else "ollama",
+                fell_back=fell_back,
             )
         # Summarizer declined — too short to be worth it. Fall through, so a
         # bypass is indistinguishable from the mode being off.
