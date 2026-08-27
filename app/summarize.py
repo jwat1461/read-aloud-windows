@@ -60,7 +60,12 @@ LIST_MIN_LINES = 3
 LIST_SHARE = 0.7
 CODE_SHARE = 0.4
 
+# Bumped whenever the shape of the file changes in a way that makes an older
+# one wrong rather than merely incomplete. See load_rules().
+RULES_VERSION = 2
+
 DEFAULT_RULES: dict = {
+    "version": RULES_VERSION,
     "pain_words": [
         "again", "blocked", "broken", "cannot", "cant", "complaint", "cost",
         "deadline", "error", "expensive", "fail", "failed", "late", "missing",
@@ -129,6 +134,7 @@ def load_rules(path: Path | None = None) -> dict:
     """
     path = RULES_PATH if path is None else path
     rules = {
+        "version": RULES_VERSION,
         "pain_words": list(DEFAULT_RULES["pain_words"]),
         "negations": list(DEFAULT_RULES["negations"]),
         "negation_window": DEFAULT_RULES["negation_window"],
@@ -138,6 +144,21 @@ def load_rules(path: Path | None = None) -> dict:
     try:
         stored = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
+        save_rules(rules, path)
+        return rules
+
+    # A file from an older build is worse than no file at all. Version 1 listed
+    # "no" and "not" as pain words; version 2 treats them as negators, so
+    # keeping the old list would have every negated sentence scoring as pain --
+    # the exact thing the negation window exists to stop. Keep the old file
+    # beside the new one so a tuned copy is never simply destroyed.
+    if isinstance(stored, dict) and stored.get("version") != RULES_VERSION:
+        try:
+            path.with_suffix(".v1.json").write_text(
+                json.dumps(stored, indent=2, sort_keys=True), "utf-8"
+            )
+        except OSError:
+            pass
         save_rules(rules, path)
         return rules
 

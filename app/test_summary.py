@@ -349,6 +349,41 @@ class RulesFile(unittest.TestCase):
         )
         self.assertEqual(json.loads(path.read_text("utf-8"))["weights"], rules["weights"])
 
+    def test_a_rules_file_from_an_older_build_is_replaced_not_trusted(self):
+        """Version 1 listed "no" and "not" as pain words. Version 2 treats them
+        as negators, so keeping the old list would score every negated sentence
+        as pain -- the exact thing the negation window exists to stop."""
+        path = Path(tempfile.mkdtemp()) / "summary_rules.json"
+        stale = {
+            "pain_words": ["no", "not", "error", "mything"],
+            "weights": {"pain_word": 1.0, "textrank_blend": 0.4},
+        }
+        path.write_text(json.dumps(stale), "utf-8")
+
+        rules = summarize.load_rules(path)
+        self.assertEqual(rules["pain_words"], summarize.DEFAULT_RULES["pain_words"])
+        self.assertNotIn("no", rules["pain_words"])
+        self.assertNotIn("not", rules["pain_words"])
+        self.assertIn("negations", rules)
+        self.assertEqual(rules["negation_window"], 3)
+        self.assertEqual(
+            json.loads(path.read_text("utf-8"))["version"], summarize.RULES_VERSION
+        )
+
+        kept = path.with_suffix(".v1.json")
+        self.assertTrue(kept.exists(), "a tuned file was destroyed without a copy")
+        self.assertEqual(json.loads(kept.read_text("utf-8")), stale)
+
+    def test_a_current_rules_file_is_left_alone(self):
+        path = Path(tempfile.mkdtemp()) / "summary_rules.json"
+        summarize.load_rules(path)                      # writes current defaults
+        tuned = json.loads(path.read_text("utf-8"))
+        tuned["pain_words"] = tuned["pain_words"] + ["gearbox"]
+        path.write_text(json.dumps(tuned), "utf-8")
+
+        self.assertIn("gearbox", summarize.load_rules(path)["pain_words"])
+        self.assertFalse(path.with_suffix(".v1.json").exists())
+
     def test_a_corrupt_rules_file_falls_back_instead_of_crashing(self):
         path = Path(tempfile.mkdtemp()) / "summary_rules.json"
         path.write_text("{not json at all", "utf-8")
