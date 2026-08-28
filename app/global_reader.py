@@ -26,10 +26,13 @@ and read what lands on the clipboard. The clipboard is restored afterwards.
 from __future__ import annotations
 
 import ctypes
+import os
 import queue
 import sys
 import time
 import tkinter as tk
+import traceback
+from datetime import datetime
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import ttk
@@ -329,6 +332,7 @@ class GlobalReader(tk.Tk):
 
         # Closing the window hides to the tray; Quit is how you actually exit.
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        self.report_callback_exception = self._on_callback_error
         self._tick_job = self.after(POLL_MS, self._tick)
 
     def _report_hotkey_failures(self) -> None:
@@ -845,9 +849,20 @@ class GlobalReader(tk.Tk):
     # -------------------------------------------------------------- windowing
 
     def hide_to_tray(self) -> None:
-        if not self.tray.tray_ok:
-            # No tray icon means no way back; treat the close box as Quit.
-            self.quit_app()
+        """Closing the window hides it. It must never be a way to quit.
+
+        This used to quit outright when the icon was missing, on the grounds
+        that there would be no way back. But the icon goes missing for ordinary
+        reasons -- Explorer restarting, or the shell not being ready yet when
+        this starts at login -- and a background reader that silently exits when
+        you close its window is indistinguishable from one that crashed. Ask the
+        shell for the icon again instead, and only refuse to hide if it will not
+        come back.
+        """
+        if not self.tray.tray_ok and not self.tray.readd_icon():
+            self._set_status(
+                "No tray icon, so the window is staying: use Quit to exit."
+            )
             return
         self.withdraw()
 
@@ -985,6 +1000,15 @@ class GlobalReader(tk.Tk):
 
         self._tick_job = self.after(POLL_MS, self._tick)
 
+    def _on_callback_error(self, exc, value, tb) -> None:
+        """Tk prints these and carries on, which under pythonw means they go
+        nowhere. Keep them, and say so on screen rather than going quiet."""
+        record_crash("callback", value if isinstance(value, BaseException) else exc)
+        try:
+            self._set_status(f"Something went wrong ({exc.__name__}) - see crash.log")
+        except Exception:
+            pass
+
     def _release_tk_variables(self) -> None:
         """Drop the Tk variables before the interpreter goes away.
 
@@ -1020,6 +1044,28 @@ class GlobalReader(tk.Tk):
         self.destroy()
 
 
+CRASH_LOG = Path(os.environ.get("APPDATA") or Path.home()) / "ReadAloud" / "crash.log"
+
+
+def record_crash(where: str, exc: BaseException) -> None:
+    """Write down why we are about to disappear.
+
+    Under pythonw there is no console, so an unhandled exception takes the
+    process with it and leaves nothing at all behind. "It quit for no reason"
+    is only unanswerable because nobody wrote the reason down.
+    """
+    try:
+        CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with CRASH_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"---- {datetime.now().isoformat(timespec='seconds')} "
+                         f"{where}" + chr(10))
+            traceback.print_exception(
+                type(exc), exc, exc.__traceback__, file=handle
+            )
+    except OSError:
+        pass
+
+
 def main() -> int:
     if sys.platform != "win32":
         print("Read Aloud Anywhere uses Windows hotkeys and SAPI; Windows only.")
@@ -1033,6 +1079,9 @@ def main() -> int:
 
     try:
         GlobalReader().mainloop()
+    except BaseException as exc:  # noqa: BLE001 - the point is to catch the lot
+        record_crash("mainloop", exc)
+        raise
     finally:
         release_single_instance(handle)
     return 0

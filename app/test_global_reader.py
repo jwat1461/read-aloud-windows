@@ -214,6 +214,58 @@ class GlobalReaderBehaviour(unittest.TestCase):
         combos = [(mods, vk) for mods, vk, _label, _desc in HOTKEYS.values()]
         self.assertEqual(len(combos), len(set(combos)))
 
+    def test_closing_the_window_never_quits_the_app(self):
+        """It used to quit outright when the icon was missing. The icon goes
+        missing for ordinary reasons -- Explorer restarting, or the shell not
+        being ready at login -- and a background reader that exits when you
+        close its window is indistinguishable from one that crashed."""
+        quit_calls = []
+        self.app.quit_app = lambda: quit_calls.append("quit")
+
+        self.app.tray.tray_ok = False
+        self.app.tray.readd_icon = lambda: False
+        self.app.hide_to_tray()
+        self.app.update()
+
+        self.assertEqual(quit_calls, [], "closing the window quit the app")
+        self.assertEqual(self.app.state(), "normal", "the window vanished instead")
+        self.assertIn("Quit", self.app.status_var.get())
+
+    def test_a_lost_tray_icon_is_asked_for_again_before_giving_up(self):
+        asked = []
+        self.app.tray.tray_ok = False
+        self.app.tray.readd_icon = lambda: (asked.append("readd"), True)[1]
+
+        self.app.hide_to_tray()
+        self.app.update()
+        self.assertEqual(asked, ["readd"])
+        self.assertEqual(self.app.state(), "withdrawn", "it did not hide")
+        self.app.deiconify()
+
+    def test_the_app_listens_for_explorer_restarting(self):
+        """Explorer destroys every tray icon when it restarts; putting it back
+        is the app's job. Without this the icon just disappears."""
+        self.assertTrue(tray.WM_TASKBARCREATED, "TaskbarCreated was not registered")
+        self.assertTrue(self.app.tray.readd_icon(), "the icon would not come back")
+        self.assertTrue(self.app.tray.tray_ok)
+
+    def test_a_callback_error_is_written_down_not_lost(self):
+        """Under pythonw there is no console, so a swallowed exception leaves
+        nothing behind at all. That is what makes "it quit for no reason"
+        unanswerable."""
+        import global_reader as gr
+
+        written = []
+        original = gr.record_crash
+        gr.record_crash = lambda where, exc: written.append((where, type(exc)))
+        try:
+            self.app._on_callback_error(ValueError, ValueError("boom"), None)
+        finally:
+            gr.record_crash = original
+
+        self.assertEqual(written, [("callback", ValueError)])
+        self.assertIn("crash.log", self.app.status_var.get())
+
     def test_tray_icon_was_added(self):
         self.assertTrue(self.app.tray.tray_ok, "Shell_NotifyIcon rejected the icon")
 

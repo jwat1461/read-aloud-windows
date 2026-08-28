@@ -186,6 +186,14 @@ user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
 user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
 user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
 user32.GetClipboardSequenceNumber.argtypes = []
+user32.RegisterWindowMessageW.restype = wintypes.UINT
+user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+
+# Explorer broadcasts this to every top-level window after it restarts. Every
+# tray icon is destroyed when it goes, and it is each app's job to put its own
+# back -- an app that does not simply disappears from the notification area and
+# looks, from the outside, exactly like it crashed.
+WM_TASKBARCREATED = user32.RegisterWindowMessageW("TaskbarCreated")
 shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
@@ -390,6 +398,10 @@ class TrayBackend(threading.Thread):
                 self.events.put(("menu", CMD_SHOW))
             return 0
 
+        if message and message == WM_TASKBARCREATED:
+            self.tray_ok = self._add_icon()
+            return 0
+
         if message == WM_CLIPBOARDUPDATE:
             # With auto-read off there is nothing to say, and every copy anyone
             # makes would otherwise cross to the Tk thread for nothing. The
@@ -459,6 +471,14 @@ class TrayBackend(threading.Thread):
         self._nid.szTip = self.tooltip_text()
         self._nid.uFlags = NIF_TIP
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
+
+    def readd_icon(self) -> bool:
+        """Put the icon back. Safe to call when it is already there."""
+        if not self._hwnd:
+            return False
+        self._remove_icon()
+        self.tray_ok = self._add_icon()
+        return self.tray_ok
 
     def _add_icon(self) -> bool:
         hicon = None
