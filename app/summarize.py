@@ -23,6 +23,12 @@ Negation is handled with a window: a pain word within a few tokens after a
 negator does not count, so "no errors" and "not broken" read as neutral rather
 than as the loudest sentences in the document.
 
+Sentences inherit from the header they sit under. "Waiting on others:" tells you
+what the lines below it are, and a status document says most of what matters in
+its headings, so a header that scores lends part of its score to everything
+under it until the next one. Headers are never themselves selected -- reading a
+heading aloud in place of its content is not a summary.
+
 Some text should not be summarized at all — code, a bare URL, a list of short
 lines — and inside otherwise-ordinary prose those same shapes should never be
 *chosen*, because a summary that reads out a bullet or a URL is worse than one
@@ -75,15 +81,17 @@ CODE_SHARE = 0.4
 
 # Bumped whenever the shape of the file changes in a way that makes an older
 # one wrong rather than merely incomplete. See load_rules().
-RULES_VERSION = 2
+RULES_VERSION = 3
 
 DEFAULT_RULES: dict = {
     "version": RULES_VERSION,
+    # A phrase with a space in it is matched as a phrase; everything else is a
+    # single token, plural-folded.
     "pain_words": [
         "again", "blocked", "broken", "cannot", "cant", "complaint", "cost",
         "deadline", "error", "expensive", "fail", "failed", "late", "missing",
-        "must", "never", "refund", "risk", "slow", "still", "stuck", "urgent",
-        "wont", "wrong",
+        "must", "never", "overdue", "owed", "pending", "refund", "risk", "slow",
+        "still", "stuck", "urgent", "waiting", "waiting on", "wont", "wrong",
     ],
     # Seeded from VADER's NEGATE set, with the contractions written both ways so
     # the tokenizer's apostrophe handling cannot matter.
@@ -102,6 +110,8 @@ DEFAULT_RULES: dict = {
         # Modest, per the note above: this is email and chat, not news copy.
         "first_paragraph": 0.25,
         "last_paragraph": 0.2,
+        # What a scoring header lends to each sentence beneath it.
+        "header_weight": 0.5,
         "cue_blend": 0.6,
         "luhn_blend": 0.4,
     },
@@ -127,6 +137,12 @@ _CODEY = re.compile(
     re.IGNORECASE,
 )
 _FENCE = re.compile(r"^\s*```", re.MULTILINE)
+
+# Headers, by the three shapes that actually turn up in pasted text.
+_MD_HEADER = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+_BOLD_ONLY = re.compile(r"^\s*(\*\*|__)\s*[^*_\s].*?\s*(\*\*|__)\s*:?\s*$")
+_COLON_HEADER = re.compile(r"^[^.!?\n]{1,70}:\s*$")
+HEADER_MAX_WORDS = 8
 
 # Words too common to say anything about what a sentence is about.
 _STOP = frozenset("""
@@ -273,6 +289,7 @@ def _record(
             "question": round(signals["question"], 6),
             "number": round(signals["number"], 6),
             "position": round(signals["position"], 6),
+            "header_bonus": round(signals.get("header_bonus", 0.0), 6),
             "frequency": round(signals.get("frequency", 0.0), 6),
         }
         if with_text:
@@ -354,11 +371,39 @@ def looks_like_list(text: str) -> bool:
     return listy / len(lines) >= LIST_SHARE
 
 
+def is_header(sentence: str) -> bool:
+    """A markdown heading, a bold-only line, or a short line ending in a colon.
+
+    Deliberately narrow. A false positive costs a sentence its place in the
+    summary and hands its score to whatever follows, which is worse than
+    missing a heading altogether.
+    """
+    stripped = sentence.strip()
+    if not stripped:
+        return False
+    if "\n" in stripped:
+        # Without a blank line after it the chunker keeps a heading and the line
+        # below it in one piece. That piece is content, and calling it a header
+        # would both bar it from selection and hand its score to the next
+        # section. A header is a line.
+        return False
+    if _MD_HEADER.match(stripped):
+        return True
+    if _BOLD_ONLY.match(stripped):
+        return True
+    return bool(
+        _COLON_HEADER.match(stripped)
+        and len(stripped.split()) <= HEADER_MAX_WORDS
+    )
+
+
 def is_excluded_line(sentence: str) -> bool:
     """A sentence that must never be *chosen*, even inside ordinary prose."""
     stripped = sentence.strip()
     if not stripped:
         return True
+    if is_header(stripped):
+        return True  # a heading read in place of its content is not a summary
     if _BULLET.match(stripped):
         return True
     if _URL.search(stripped):
@@ -407,6 +452,33 @@ def target_count(sentence_count: int) -> int:
 # -------------------------------------------------------------------- scoring
 
 
+def _pain_positions(tokens: list[str], vocabulary: frozenset) -> list[int]:
+    """Start positions of every pain hit, single words and phrases alike.
+
+    "waiting on" has to be matchable as a phrase or it can only ever be entered
+    in the rules file as the bare word, which then also fires on "waiting for
+    the kettle". Anything with a space in it is read as a sequence.
+    """
+    phrases = sorted(
+        (tuple(entry.split()) for entry in vocabulary if " " in entry),
+        key=len,
+        reverse=True,
+    )
+    hits = []
+    index = 0
+    while index < len(tokens):
+        for phrase in phrases:
+            if tuple(tokens[index:index + len(phrase)]) == phrase:
+                hits.append(index)
+                index += len(phrase)
+                break
+        else:
+            if _matches(tokens[index], vocabulary):
+                hits.append(index)
+            index += 1
+    return hits
+
+
 def _negated_positions(tokens: list[str], negations: frozenset, window: int) -> set:
     """Token positions falling inside the window after a negator."""
     blocked = set()
@@ -417,6 +489,40 @@ def _negated_positions(tokens: list[str], negations: frozenset, window: int) -> 
     return blocked
 
 
+def _pain_score(sentence: str, rules: dict) -> tuple[float, int]:
+    """(score, suppressed) for one line, saturating and negation-aware."""
+    pain = frozenset(rules["pain_words"])
+    negations = frozenset(rules["negations"])
+    blocked = _negated_positions(
+        _words(sentence), negations, int(rules["negation_window"])
+    )
+    positions = _pain_positions(_words(sentence), pain)
+    hits = sum(1 for p in positions if p not in blocked)
+    suppressed = len(positions) - hits
+    # Saturating, so one furious line cannot own the whole summary.
+    return rules["weights"]["pain_word"] * math.sqrt(hits), suppressed
+
+
+def header_bonuses(sentences: list[str], rules: dict) -> list[float]:
+    """What each sentence inherits from the header above it.
+
+    A header that scores nothing lends nothing, and it still closes off the one
+    before it -- otherwise a neutral section would keep collecting a bonus from
+    whatever heading last happened to mention a deadline.
+    """
+    weight = rules["weights"]["header_weight"]
+    bonuses = []
+    current = 0.0
+    for sentence in sentences:
+        if is_header(sentence):
+            score, _suppressed = _pain_score(sentence, rules)
+            current = score * weight
+            bonuses.append(0.0)  # the header itself inherits nothing
+        else:
+            bonuses.append(current)
+    return bonuses
+
+
 def _signals(sentences: list[str], rules: dict) -> list[dict]:
     """Each sentence's cue signals, kept apart rather than summed.
 
@@ -424,27 +530,15 @@ def _signals(sentences: list[str], rules: dict) -> list[dict]:
     Tuning weights against a single blended number is guesswork.
     """
     weights = rules["weights"]
-    pain = frozenset(rules["pain_words"])
-    negations = frozenset(rules["negations"])
-    window = int(rules["negation_window"])
     total = len(sentences)
     # Treat the opening and closing fifth as first and last paragraph: it needs
     # no paragraph structure and behaves the same on a wall of text.
     edge = max(1, total // 5)
+    inherited = header_bonuses(sentences, rules)
 
     breakdown = []
     for index, sentence in enumerate(sentences):
-        tokens = _words(sentence)
-        blocked = _negated_positions(tokens, negations, window)
-        hits = 0
-        suppressed = 0
-        for position, token in enumerate(tokens):
-            if not _matches(token, pain):
-                continue
-            if position in blocked:
-                suppressed += 1
-            else:
-                hits += 1
+        pain_score, suppressed = _pain_score(sentence, rules)
 
         if index < edge:
             position_score = weights["first_paragraph"]
@@ -454,20 +548,22 @@ def _signals(sentences: list[str], rules: dict) -> list[dict]:
             position_score = 0.0
 
         breakdown.append({
-            # Saturating, so one furious sentence cannot own the summary.
-            "pain": weights["pain_word"] * math.sqrt(hits),
+            "pain": pain_score,
             "negation_hits": suppressed,
             "question": weights["question"] if "?" in sentence else 0.0,
             "number": weights["figure"] if _FIGURE.search(sentence) else 0.0,
             "position": position_score,
+            "header_bonus": inherited[index],
         })
     return breakdown
 
 
+CUE_PARTS = ("pain", "question", "number", "position", "header_bonus")
+
+
 def _cue_scores(sentences: list[str], rules: dict) -> list[float]:
     return [
-        s["pain"] + s["question"] + s["number"] + s["position"]
-        for s in _signals(sentences, rules)
+        sum(s[part] for part in CUE_PARTS) for s in _signals(sentences, rules)
     ]
 
 
@@ -518,9 +614,7 @@ def score_detail(
     weights = rules["weights"]
 
     breakdown = _signals(sentences, rules)
-    cue = _normalise(
-        [s["pain"] + s["question"] + s["number"] + s["position"] for s in breakdown]
-    )
+    cue = _normalise([sum(s[part] for part in CUE_PARTS) for s in breakdown])
     frequency = _normalise(_luhn_scores(sentences))
 
     totals = []

@@ -105,6 +105,50 @@ NEGATION_FIXTURE = (
     "home happy at the end of it."
 )
 
+# Two sections, word for word identical beneath their headings. Anything that
+# separates them can only have come from the heading above.
+HEADER_BULLETS = """## Waiting on others
+
+- The reconciliation has not come back from finance yet at all.
+- The revised quote from the vendor has still not arrived.
+
+## Notes from the review
+
+- The reconciliation has not come back from finance yet at all.
+- The revised quote from the vendor has still not arrived.
+"""
+
+# The same sentence three times, under two neutral headings and one that scores.
+# Identical text means identical pain, frequency and shape, and none of the three
+# sits at an edge, so position cannot separate them either: the heading above is
+# the only thing that differs. Two of the three fit in the summary, so which two
+# get picked is a direct read-out of whether inheritance works.
+_TWIN = (
+    "The reconciliation from finance is still outstanding after several weeks "
+    "of chasing and nobody can say when it will land."
+)
+HEADER_PROSE = f"""## Notes from the review
+
+{_TWIN}
+
+## Anything else
+
+{_TWIN}
+
+## Waiting on others
+
+{_TWIN}
+
+Refreshments continue to be donated by the usual people every single week.
+"""
+
+NO_HEADERS = """The migration ran overnight and failed twice before it finally
+finished. We are blocked on the reporting rebuild until somebody signs off on
+the schema. The client has asked three times now and is threatening to ask for
+a refund. Nobody has been able to reproduce the error on staging at all. It
+costs $4000 a month to keep both environments alive while this drags on. The
+deadline was Friday and it is now Tuesday afternoon."""
+
 SNAPSHOT = Path(__file__).with_name("test_summary_snapshot.json")
 GOLDEN = Path(__file__).with_name("test_golden_pieces.json")
 
@@ -293,6 +337,183 @@ class Selection(unittest.TestCase):
         )
 
 
+class HeaderInheritance(unittest.TestCase):
+    """A heading says what the lines under it are, so it lends them its score."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+
+    def test_the_three_header_shapes_are_recognised(self):
+        for header in ("## Waiting on others", "# Blocked", "**Overdue**",
+                       "__Still to do__", "Waiting on others:", "Blocked:"):
+            self.assertTrue(summarize.is_header(header), header)
+
+    def test_ordinary_sentences_are_not_headers(self):
+        for line in (
+            "The build failed again this morning.",
+            "It adds auto-read clipboard: with it on, every copy is read aloud.",
+            "- chase the client about the refund",
+            "There is a colon in this sentence: and then it carries on at length.",
+        ):
+            self.assertFalse(summarize.is_header(line), line)
+
+    def test_a_heading_glued_to_its_first_line_is_not_treated_as_a_header(self):
+        """Without a blank line the chunker keeps them in one piece. Calling
+        that piece a header would bar real content from the summary and hand
+        its score to the section below."""
+        merged = "## Waiting on others\n- The reconciliation has not come back."
+        self.assertFalse(summarize.is_header(merged))
+        self.assertFalse(summarize.is_excluded_line(merged))
+
+    def test_headers_are_never_selected(self):
+        sentences = sentences_of(HEADER_PROSE)
+        headers = [s for s in sentences if summarize.is_header(s)]
+        self.assertGreaterEqual(len(headers), 3, "fixture lost its headings")
+        for header in headers:
+            self.assertTrue(summarize.is_excluded_line(header))
+        for picked in summarize.summarize(HEADER_PROSE, self.rules):
+            self.assertFalse(summarize.is_header(picked), picked)
+
+    def test_a_scoring_header_lends_to_everything_until_the_next_one(self):
+        sentences = sentences_of(HEADER_PROSE)
+        bonuses = summarize.header_bonuses(sentences, self.rules)
+
+        waiting = next(i for i, s in enumerate(sentences)
+                       if summarize.is_header(s) and "Waiting" in s)
+        following = [i for i in range(waiting + 1, len(sentences))
+                     if not summarize.is_header(sentences[i])]
+        self.assertGreaterEqual(len(following), 2, sentences)
+        for index in following:
+            self.assertGreater(bonuses[index], 0.0, sentences[index])
+
+        # The heading itself inherits nothing, and a neutral one lends nothing.
+        self.assertEqual(bonuses[waiting], 0.0)
+        neutral = next(i for i, s in enumerate(sentences)
+                       if summarize.is_header(s) and "Anything else" in s)
+        after_neutral = next(i for i in range(neutral + 1, len(sentences))
+                             if not summarize.is_header(sentences[i]))
+        self.assertEqual(bonuses[after_neutral], 0.0, "a neutral header lent a bonus")
+
+    def test_the_bonus_is_the_header_score_times_the_weight(self):
+        sentences = ["## Waiting on others", "Finance have not sent it through."]
+        score, _ = summarize._pain_score(sentences[0], self.rules)
+        self.assertGreater(score, 0.0, "the header scored nothing")
+        self.assertAlmostEqual(
+            summarize.header_bonuses(sentences, self.rules)[1],
+            score * self.rules["weights"]["header_weight"],
+        )
+
+    def test_identical_bullets_outrank_their_twins_under_a_neutral_header(self):
+        """Word for word the same, so only the heading above can separate them.
+
+        Bullets stay ineligible for *selection* -- that rule has not moved --
+        so this is about rank, which is what the bonus changes.
+        """
+        sentences = sentences_of(HEADER_BULLETS)
+        scores = summarize.rank_sentences(sentences, self.rules)
+
+        pairs = {}
+        for index, sentence in enumerate(sentences):
+            if not summarize.is_header(sentence):
+                pairs.setdefault(sentence.strip(), []).append(index)
+        twinned = {text: idx for text, idx in pairs.items() if len(idx) == 2}
+        self.assertGreaterEqual(len(twinned), 2, f"fixture lost its twins: {pairs}")
+
+        for text, (under_waiting, under_notes) in twinned.items():
+            self.assertGreater(
+                scores[under_waiting], scores[under_notes],
+                f"the heading made no difference to: {text}",
+            )
+
+    def test_identical_sentences_tie_exactly_without_the_bonus(self):
+        """The premise the next test rests on: strip the bonus and the three
+        twins are indistinguishable, so anything that separates them later can
+        only have come from their headings."""
+        sentences = sentences_of(HEADER_PROSE)
+        twins = [i for i, s in enumerate(sentences) if "reconciliation" in s]
+        self.assertEqual(len(twins), 3, sentences)
+
+        blind = dict(
+            self.rules, weights=dict(self.rules["weights"], header_weight=0.0)
+        )
+        scores = summarize.rank_sentences(sentences, blind)
+        for other in twins[1:]:
+            self.assertAlmostEqual(scores[twins[0]], scores[other], places=9)
+
+    def test_the_bonus_changes_which_sentence_is_picked(self):
+        sentences = sentences_of(HEADER_PROSE)
+        twins = [i for i, s in enumerate(sentences) if "reconciliation" in s]
+        blind = dict(
+            self.rules, weights=dict(self.rules["weights"], header_weight=0.0)
+        )
+
+        def picked_indexes(rules):
+            scores = summarize.rank_sentences(sentences, rules)
+            eligible = summarize.eligible_indexes(sentences)
+            keep = summarize.target_count(len(eligible))
+            order = sorted(eligible, key=lambda i: (-scores[i], i))
+            return sorted(order[:keep])
+
+        without = picked_indexes(blind)
+        with_bonus = picked_indexes(self.rules)
+        self.assertNotEqual(with_bonus, without, "header_weight changed nothing")
+
+        # Tied, the earlier twins win on index; the heading promotes the last.
+        self.assertNotIn(twins[2], without)
+        self.assertIn(twins[2], with_bonus, "the waiting section was not promoted")
+
+    def test_a_document_with_no_headers_is_scored_exactly_as_before(self):
+        sentences = sentences_of(NO_HEADERS)
+        self.assertFalse(any(summarize.is_header(s) for s in sentences))
+
+        _scores, breakdown = summarize.score_detail(sentences, self.rules)
+        self.assertTrue(all(s["header_bonus"] == 0.0 for s in breakdown))
+
+        # And the weight is then inert: any value gives the same answer.
+        for weight in (0.0, 0.5, 5.0):
+            tuned = dict(
+                self.rules, weights=dict(self.rules["weights"], header_weight=weight)
+            )
+            self.assertEqual(
+                summarize.rank_sentences(sentences, tuned),
+                summarize.rank_sentences(sentences, self.rules),
+                f"header_weight={weight} moved a headerless document",
+            )
+
+    def test_a_phrase_in_the_vocabulary_is_matched_as_a_phrase(self):
+        pain = frozenset(self.rules["pain_words"])
+        self.assertIn("waiting on", self.rules["pain_words"])
+        self.assertEqual(
+            summarize._pain_positions(summarize._words("we are waiting on finance"), pain),
+            [2],
+        )
+        self.assertEqual(
+            summarize._pain_positions(summarize._words("nothing at all here"), pain), []
+        )
+
+    def test_the_new_status_words_are_in_the_defaults(self):
+        for word in ("waiting", "waiting on", "blocked", "owed", "pending", "overdue"):
+            self.assertIn(word, summarize.DEFAULT_RULES["pain_words"], word)
+
+    def test_a_negated_header_lends_nothing(self):
+        sentences = ["Nothing blocked:", "Everything came back on time this week."]
+        self.assertTrue(summarize.is_header(sentences[0]))
+        self.assertEqual(summarize.header_bonuses(sentences, self.rules)[1], 0.0)
+
+    def test_the_bonus_is_logged_as_its_own_field(self):
+        log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+        summarize.summarize(HEADER_PROSE, self.rules, source="hotkey", log_path=log)
+        record = json.loads(log.read_text("utf-8").splitlines()[0])
+
+        self.assertTrue(record["picked"])
+        for entry in record["picked"]:
+            self.assertIn("header_bonus", entry)
+        self.assertTrue(
+            any(e["header_bonus"] > 0 for e in record["picked"]),
+            "nothing inherited anything, so the field proves nothing",
+        )
+
+
 class Determinism(unittest.TestCase):
     def setUp(self):
         self.rules = fresh_rules()
@@ -389,6 +610,26 @@ class RulesFile(unittest.TestCase):
         self.assertTrue(kept.exists(), "a tuned file was destroyed without a copy")
         self.assertEqual(json.loads(kept.read_text("utf-8")), stale)
 
+    def test_a_version_two_file_is_migrated_for_the_header_weight(self):
+        """v2 had no header_weight and none of the status vocabulary. Reading it
+        back would leave header inheritance silently switched off."""
+        path = Path(tempfile.mkdtemp()) / "summary_rules.json"
+        v2 = {
+            "version": 2,
+            "pain_words": ["error", "failed"],
+            "negations": ["not", "no"],
+            "negation_window": 3,
+            "weights": {"pain_word": 1.0, "cue_blend": 0.6, "luhn_blend": 0.4},
+        }
+        path.write_text(json.dumps(v2), "utf-8")
+
+        rules = summarize.load_rules(path)
+        self.assertEqual(rules["version"], summarize.RULES_VERSION)
+        self.assertIn("header_weight", rules["weights"])
+        self.assertEqual(rules["weights"]["header_weight"], 0.5)
+        self.assertIn("waiting on", rules["pain_words"])
+        self.assertTrue(path.with_suffix(".v1.json").exists(), "no copy was kept")
+
     def test_a_current_rules_file_is_left_alone(self):
         path = Path(tempfile.mkdtemp()) / "summary_rules.json"
         summarize.load_rules(path)                      # writes current defaults
@@ -463,7 +704,7 @@ class ScoreLog(unittest.TestCase):
     }
     SIGNALS = {
         "index", "score", "pain", "negation_hits",
-        "question", "number", "position", "frequency",
+        "question", "number", "position", "header_bonus", "frequency",
     }
 
     def setUp(self):
