@@ -66,6 +66,13 @@ LOG_PATH = _HOME / "summary_log.jsonl"
 LOG_ROTATED = _HOME / "summary_log.1.jsonl"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 
+# One line, set when a user's rules file was brought forward to a newer version.
+upgrade_notes: list[str] = []
+
+# How many losing sentences to record beside the winners. Three is enough to
+# see the margin without turning every line into a transcript of the document.
+NEAR_MISS_COUNT = 3
+
 # Below either of these a summary is worse than the text it replaces.
 MIN_SENTENCES = 4
 MIN_WORDS = 60
@@ -81,7 +88,7 @@ CODE_SHARE = 0.4
 
 # Bumped whenever the shape of the file changes in a way that makes an older
 # one wrong rather than merely incomplete. See load_rules().
-RULES_VERSION = 3
+RULES_VERSION = 4
 
 DEFAULT_RULES: dict = {
     "version": RULES_VERSION,
@@ -102,6 +109,23 @@ DEFAULT_RULES: dict = {
         "not", "nothing", "nowhere", "oughtnt", "shant", "shouldnt", "uhuh",
         "wasnt", "werent", "without", "wont", "wouldnt",
     ],
+    # Verbs that open an instruction. An agent telling you what to do writes
+    # imperatives, and an imperative scores nothing against pain vocabulary --
+    # which is why steps were losing to complaints in every read.
+    "action_words": [
+        "add", "check", "click", "close", "confirm", "copy", "create", "delete",
+        "disable", "download", "drag", "enable", "enter", "ensure", "go",
+        "install", "make", "navigate", "open", "paste", "press", "put", "reload",
+        "remove", "rename", "replace", "restart", "run", "save", "scroll",
+        "select", "set", "start", "stop", "switch", "turn", "type", "update",
+        "use", "verify",
+    ],
+    # Phrases that mark an instruction without opening with a verb.
+    "action_phrases": [
+        "you need to", "you should", "you must", "make sure", "be sure to",
+        "do not forget", "dont forget", "remember to", "next step", "first you",
+        "then you", "note that",
+    ],
     "negation_window": 3,
     "weights": {
         "pain_word": 1.0,
@@ -110,6 +134,9 @@ DEFAULT_RULES: dict = {
         # Modest, per the note above: this is email and chat, not news copy.
         "first_paragraph": 0.25,
         "last_paragraph": 0.2,
+        # An instruction is worth at least as much as a complaint: reading
+        # somebody the problem while dropping the fix is the wrong half.
+        "action_word": 1.2,
         # What a scoring header lends to each sentence beneath it.
         "header_weight": 0.5,
         "cue_blend": 0.6,
@@ -144,6 +171,9 @@ _BOLD_ONLY = re.compile(r"^\s*(\*\*|__)\s*[^*_\s].*?\s*(\*\*|__)\s*:?\s*$")
 _COLON_HEADER = re.compile(r"^[^.!?\n]{1,70}:\s*$")
 HEADER_MAX_WORDS = 8
 
+# "1." / "2)" / "Step 3" at the start of a line: a numbered instruction.
+_STEP = re.compile(r"^\s*(?:step\s+)?\(?\d{1,2}[.)]?\s+\S", re.IGNORECASE)
+
 # Words too common to say anything about what a sentence is about.
 _STOP = frozenset("""
 a an and are as at be been being but by for from had has have he her his i if in
@@ -162,13 +192,16 @@ def load_rules(path: Path | None = None) -> dict:
     stopping the app; anything the file does not mention keeps its default.
     """
     path = RULES_PATH if path is None else path
+    # Built from DEFAULT_RULES rather than a hand-written list of keys. The
+    # hand-written version silently dropped every key added after it, so a new
+    # signal read an empty vocabulary and scored zero for everything.
     rules = {
-        "version": RULES_VERSION,
-        "pain_words": list(DEFAULT_RULES["pain_words"]),
-        "negations": list(DEFAULT_RULES["negations"]),
-        "negation_window": DEFAULT_RULES["negation_window"],
-        "weights": dict(DEFAULT_RULES["weights"]),
+        key: (dict(value) if isinstance(value, dict)
+              else list(value) if isinstance(value, list)
+              else value)
+        for key, value in DEFAULT_RULES.items()
     }
+    rules["version"] = RULES_VERSION
 
     try:
         stored = json.loads(path.read_text("utf-8"))
@@ -176,20 +209,51 @@ def load_rules(path: Path | None = None) -> dict:
         save_rules(rules, path)
         return rules
 
-    # A file from an older build is worse than no file at all. Version 1 listed
-    # "no" and "not" as pain words; version 2 treats them as negators, so
-    # keeping the old list would have every negated sentence scoring as pain --
-    # the exact thing the negation window exists to stop. Keep the old file
-    # beside the new one so a tuned copy is never simply destroyed.
+    # An older file is merged, not replaced: whatever was tuned by hand stays,
+    # and only the keys a newer build added are filled in. Replacing it outright
+    # threw away the tuning, which is the whole reason the file exists.
+    #
+    # One thing is repaired rather than kept. Version 1 listed "no" and "not" as
+    # pain words and version 2 made them negators; carried forward, every
+    # negated sentence scores as pain, which is precisely what the negation
+    # window exists to prevent. Any word that is also a negator is dropped.
     if isinstance(stored, dict) and stored.get("version") != RULES_VERSION:
+        merged = dict(rules)
+        added = []
+        for key in ("pain_words", "negations", "action_words", "action_phrases"):
+            words = stored.get(key)
+            if isinstance(words, list) and words:
+                kept = [_fold(str(w)) for w in words if str(w).strip()]
+                if key == "pain_words":
+                    negators = frozenset(merged["negations"])
+                    kept = [w for w in kept if w not in negators]
+                merged[key] = sorted(set(kept) | set(rules[key])) if key in rules \
+                    else kept
+                added += [w for w in rules.get(key, ()) if w not in kept]
+        weights = stored.get("weights")
+        if isinstance(weights, dict):
+            for name in DEFAULT_RULES["weights"]:
+                if name in weights:
+                    try:
+                        merged["weights"][name] = float(weights[name])
+                    except (TypeError, ValueError):
+                        pass
+        merged["version"] = RULES_VERSION
         try:
-            path.with_suffix(".v1.json").write_text(
-                json.dumps(stored, indent=2, sort_keys=True), "utf-8"
+            merged["negation_window"] = max(
+                0, int(stored.get("negation_window", merged["negation_window"]))
             )
-        except OSError:
+        except (TypeError, ValueError):
             pass
-        save_rules(rules, path)
-        return rules
+
+        upgrade_notes.clear()
+        if added:
+            upgrade_notes.append(
+                f"summary_rules.json updated to version {RULES_VERSION}; added "
+                + ", ".join(sorted(set(added))[:12])
+            )
+        save_rules(merged, path)
+        return merged
 
     if isinstance(stored, dict):
         for key in ("pain_words", "negations"):
@@ -274,17 +338,18 @@ def _record(
     keep: int | None,
     source: str,
     with_text: bool | None = None,
+    missed: list[int] | None = None,
 ) -> dict:
     if with_text is None:
         with_text = _log_sentence_text()
 
-    picked = []
-    for index in chosen:
+    def entry(index: int) -> dict:
         signals = breakdown[index]
-        entry = {
+        row = {
             "index": index,
             "score": round(scores[index], 6),
             "pain": round(signals["pain"], 6),
+            "action": round(signals.get("action", 0.0), 6),
             "negation_hits": signals["negation_hits"],
             "question": round(signals["question"], 6),
             "number": round(signals["number"], 6),
@@ -293,8 +358,11 @@ def _record(
             "frequency": round(signals.get("frequency", 0.0), 6),
         }
         if with_text:
-            entry["text"] = sentences[index]
-        picked.append(entry)
+            row["text"] = sentences[index]
+        return row
+
+    picked = [entry(index) for index in chosen]
+    near = [entry(index) for index in (missed or ())]
 
     return {
         "timestamp": now_iso(),
@@ -304,6 +372,10 @@ def _record(
         "bypass_reason": reason,
         "k": keep,
         "picked": picked,
+        # The sentences that came closest and lost. Without these you can see
+        # what won but never by how much, which is the one number that says
+        # which weight would have changed the answer.
+        "near_misses": near,
     }
 
 
@@ -503,6 +575,42 @@ def _pain_score(sentence: str, rules: dict) -> tuple[float, int]:
     return rules["weights"]["pain_word"] * math.sqrt(hits), suppressed
 
 
+def action_score(sentence: str, rules: dict) -> float:
+    """How much this sentence reads like something to go and do.
+
+    Three ways in: it opens with an imperative verb, it opens as a numbered
+    step, or it carries a phrase like "make sure". Saturating like pain, so a
+    paragraph of instructions cannot swamp everything else.
+    """
+    stripped = sentence.strip()
+    if not stripped:
+        return 0.0
+
+    verbs = frozenset(rules.get("action_words", ()))
+    phrases = [p for p in rules.get("action_phrases", ())]
+    tokens = _words(stripped)
+    if not tokens:
+        return 0.0
+
+    hits = 0
+    # Only the opening verb counts. "run" in the middle of a sentence is
+    # usually a noun or a past tense, and counting those made ordinary prose
+    # look like a checklist.
+    lead = tokens[0]
+    if _STEP.match(stripped):
+        hits += 1
+        after = _words(re.sub(r"^\s*(?:step\s+)?\(?\d{1,2}[.)]?\s+", "",
+                              stripped, flags=re.IGNORECASE))
+        lead = after[0] if after else lead
+    if _matches(lead, verbs):
+        hits += 1
+
+    folded = " ".join(tokens)
+    hits += sum(1 for phrase in phrases if phrase in folded)
+
+    return rules["weights"]["action_word"] * math.sqrt(hits)
+
+
 def header_bonuses(sentences: list[str], rules: dict) -> list[float]:
     """What each sentence inherits from the header above it.
 
@@ -549,6 +657,7 @@ def _signals(sentences: list[str], rules: dict) -> list[dict]:
 
         breakdown.append({
             "pain": pain_score,
+            "action": action_score(sentence, rules),
             "negation_hits": suppressed,
             "question": weights["question"] if "?" in sentence else 0.0,
             "number": weights["figure"] if _FIGURE.search(sentence) else 0.0,
@@ -558,7 +667,7 @@ def _signals(sentences: list[str], rules: dict) -> list[dict]:
     return breakdown
 
 
-CUE_PARTS = ("pain", "question", "number", "position", "header_bonus")
+CUE_PARTS = ("pain", "action", "question", "number", "position", "header_bonus")
 
 
 def _cue_scores(sentences: list[str], rules: dict) -> list[float]:
@@ -661,9 +770,11 @@ def summarize(
     # Index breaks ties, so an even score never depends on sort implementation.
     order = sorted(eligible, key=lambda i: (-scores[i], i))
     chosen = sorted(order[:keep])
+    missed = order[keep:keep + NEAR_MISS_COUNT]
 
     log_run(
-        _record(text, sentences, None, chosen, scores, breakdown, keep, source),
+        _record(text, sentences, None, chosen, scores, breakdown, keep, source,
+                missed=missed),
         log_path,
     )
     return [sentences[i] for i in chosen]

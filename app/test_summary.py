@@ -149,6 +149,15 @@ a refund. Nobody has been able to reproduce the error on staging at all. It
 costs $4000 a month to keep both environments alive while this drags on. The
 deadline was Friday and it is now Tuesday afternoon."""
 
+# What an agent actually sends: two complaints, three instructions, one aside.
+# Reading somebody the problem and dropping the fix is the wrong half.
+INSTRUCTIONS = """The migration failed twice overnight before it finally
+finished. Open chrome://extensions and turn on Developer mode at the top right.
+We are blocked on the reporting rebuild until somebody signs off on it. Click
+Load unpacked and select the extension folder inside the project. The client has
+asked three separate times now and wants a refund. Make sure the tray icon is
+visible before you carry on with anything else."""
+
 SNAPSHOT = Path(__file__).with_name("test_summary_snapshot.json")
 GOLDEN = Path(__file__).with_name("test_golden_pieces.json")
 
@@ -514,6 +523,130 @@ class HeaderInheritance(unittest.TestCase):
         )
 
 
+class ActionSignal(unittest.TestCase):
+    """Instructions have to survive. A complaint plus its fix should surface the
+    fix, and pain vocabulary scores an imperative at exactly zero."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+
+    def test_an_imperative_opening_scores(self):
+        for line in (
+            "Open chrome://extensions and turn on Developer mode.",
+            "Click Load unpacked and select the extension folder.",
+            "Run the tests before you push anything.",
+            "Restart the reader so it picks up the change.",
+        ):
+            self.assertGreater(summarize.action_score(line, self.rules), 0.0, line)
+
+    def test_directive_phrases_and_numbered_steps_score(self):
+        for line in (
+            "You need to restart the reader before it picks up the change.",
+            "Make sure the tray icon is visible before you continue.",
+            "3. Press Ctrl+Alt+S to turn summary mode on.",
+            "Step 2 opens the settings file in your editor.",
+        ):
+            self.assertGreater(summarize.action_score(line, self.rules), 0.0, line)
+
+    def test_ordinary_prose_is_not_mistaken_for_an_instruction(self):
+        """Only the opening verb counts. Counting every "run" and "set" made
+        plain description look like a checklist."""
+        for line in (
+            "The attendance figures held steady across the whole quarter.",
+            "Running the tests took about two minutes in total.",
+            "The client has asked three times and wants a refund.",
+            "It costs four thousand a month to run both environments.",
+        ):
+            self.assertEqual(summarize.action_score(line, self.rules), 0.0, line)
+
+    def test_an_instruction_beats_a_sentence_carried_by_frequency_alone(self):
+        """The 16% filler class in the real log: picks with no cue signal at
+        all, chosen purely for repeating the document's vocabulary."""
+        sentences = sentences_of(INSTRUCTIONS)
+        _scores, breakdown = summarize.score_detail(sentences, self.rules)
+        scores = summarize.rank_sentences(sentences, self.rules)
+
+        instructions = [i for i, s in enumerate(breakdown) if s["action"] > 0]
+        filler = [i for i, s in enumerate(breakdown)
+                  if not any(s[p] for p in summarize.CUE_PARTS)]
+        self.assertTrue(instructions, "fixture has no instructions")
+        if filler:
+            self.assertGreater(max(scores[i] for i in instructions),
+                               max(scores[i] for i in filler))
+
+    def test_an_instruction_reaches_the_summary(self):
+        picked = summarize.summarize(INSTRUCTIONS, self.rules)
+        self.assertTrue(
+            any(summarize.action_score(p, self.rules) > 0 for p in picked),
+            f"every instruction was cut: {picked}",
+        )
+
+    def test_turning_the_weight_off_puts_it_back_the_way_it_was(self):
+        deaf = dict(self.rules, weights=dict(self.rules["weights"], action_word=0.0))
+        sentences = sentences_of(INSTRUCTIONS)
+        self.assertNotEqual(
+            summarize.rank_sentences(sentences, self.rules),
+            summarize.rank_sentences(sentences, deaf),
+            "action_word changed nothing",
+        )
+
+    def test_the_action_score_is_logged_as_its_own_field(self):
+        log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+        summarize.summarize(INSTRUCTIONS, self.rules, source="hotkey", log_path=log)
+        record = json.loads(log.read_text("utf-8").splitlines()[0])
+        for entry in record["picked"] + record["near_misses"]:
+            self.assertIn("action", entry)
+
+
+class NearMisses(unittest.TestCase):
+    """What lost, and by how much."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+    def _record(self, text=None):
+        summarize.summarize(text or INSTRUCTIONS, self.rules,
+                            source="hotkey", log_path=self.log)
+        return json.loads(self.log.read_text("utf-8").splitlines()[-1])
+
+    def test_the_losers_are_recorded_beside_the_winners(self):
+        record = self._record()
+        self.assertTrue(record["near_misses"])
+        self.assertLessEqual(len(record["near_misses"]), summarize.NEAR_MISS_COUNT)
+
+    def test_no_sentence_is_both_picked_and_a_near_miss(self):
+        record = self._record()
+        picked = {p["index"] for p in record["picked"]}
+        missed = {p["index"] for p in record["near_misses"]}
+        self.assertEqual(picked & missed, set())
+
+    def test_every_near_miss_scored_below_every_pick(self):
+        """Otherwise the margin means nothing."""
+        record = self._record()
+        worst_pick = min(p["score"] for p in record["picked"])
+        best_miss = max(p["score"] for p in record["near_misses"])
+        self.assertGreaterEqual(worst_pick, best_miss)
+
+    def test_near_misses_come_in_descending_score_order(self):
+        record = self._record()
+        scores = [p["score"] for p in record["near_misses"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_a_bypass_records_no_near_misses(self):
+        record = self._record(CODE_FIXTURE)
+        self.assertEqual(record["near_misses"], [])
+        self.assertEqual(record["picked"], [])
+
+    def test_near_miss_text_obeys_the_same_privacy_rule_as_picks(self):
+        """The invariant is about the whole line, not one key: no sentence of
+        the source may appear anywhere in it."""
+        self._record()
+        raw = self.log.read_text("utf-8")
+        for sentence in sentences_of(INSTRUCTIONS):
+            self.assertNotIn(sentence.strip(), raw)
+
+
 class Determinism(unittest.TestCase):
     def setUp(self):
         self.rules = fresh_rules()
@@ -585,30 +718,39 @@ class RulesFile(unittest.TestCase):
         )
         self.assertEqual(json.loads(path.read_text("utf-8"))["weights"], rules["weights"])
 
-    def test_a_rules_file_from_an_older_build_is_replaced_not_trusted(self):
-        """Version 1 listed "no" and "not" as pain words. Version 2 treats them
-        as negators, so keeping the old list would score every negated sentence
-        as pain -- the exact thing the negation window exists to stop."""
+    def test_an_older_file_is_merged_so_hand_tuning_survives(self):
+        """The file exists to be tuned. Replacing it on a version bump threw
+        that away; the words somebody added by hand have to come through."""
         path = Path(tempfile.mkdtemp()) / "summary_rules.json"
         stale = {
-            "pain_words": ["no", "not", "error", "mything"],
-            "weights": {"pain_word": 1.0, "textrank_blend": 0.4},
+            "version": 1,
+            "pain_words": ["no", "not", "error", "gearbox"],
+            "weights": {"pain_word": 2.5, "textrank_blend": 0.4},
         }
         path.write_text(json.dumps(stale), "utf-8")
 
         rules = summarize.load_rules(path)
-        self.assertEqual(rules["pain_words"], summarize.DEFAULT_RULES["pain_words"])
+        self.assertIn("gearbox", rules["pain_words"], "a hand-added word was lost")
+        self.assertEqual(rules["weights"]["pain_word"], 2.5, "a tuned weight was lost")
+        self.assertIn("waiting", rules["pain_words"], "new defaults were not added")
+        self.assertIn("action_words", rules)
+
+        # One thing is repaired rather than carried forward: v1 listed these as
+        # pain words and they are now negators. Kept, every negated sentence
+        # would score as pain -- what the window exists to prevent.
         self.assertNotIn("no", rules["pain_words"])
         self.assertNotIn("not", rules["pain_words"])
-        self.assertIn("negations", rules)
-        self.assertEqual(rules["negation_window"], 3)
+
         self.assertEqual(
             json.loads(path.read_text("utf-8"))["version"], summarize.RULES_VERSION
         )
 
-        kept = path.with_suffix(".v1.json")
-        self.assertTrue(kept.exists(), "a tuned file was destroyed without a copy")
-        self.assertEqual(json.loads(kept.read_text("utf-8")), stale)
+    def test_the_upgrade_says_what_it_added(self):
+        path = Path(tempfile.mkdtemp()) / "summary_rules.json"
+        path.write_text(json.dumps({"version": 1, "pain_words": ["error"]}), "utf-8")
+        summarize.load_rules(path)
+        self.assertTrue(summarize.upgrade_notes, "an upgrade happened in silence")
+        self.assertIn("summary_rules.json", summarize.upgrade_notes[0])
 
     def test_a_version_two_file_is_migrated_for_the_header_weight(self):
         """v2 had no header_weight and none of the status vocabulary. Reading it
@@ -628,7 +770,10 @@ class RulesFile(unittest.TestCase):
         self.assertIn("header_weight", rules["weights"])
         self.assertEqual(rules["weights"]["header_weight"], 0.5)
         self.assertIn("waiting on", rules["pain_words"])
-        self.assertTrue(path.with_suffix(".v1.json").exists(), "no copy was kept")
+        self.assertIn("action_word", rules["weights"])
+        self.assertTrue(rules["action_words"], "the action vocabulary is empty")
+        # The user's own entries survive the upgrade.
+        self.assertIn("failed", rules["pain_words"])
 
     def test_a_current_rules_file_is_left_alone(self):
         path = Path(tempfile.mkdtemp()) / "summary_rules.json"
@@ -700,10 +845,10 @@ class ScoreLog(unittest.TestCase):
 
     KEYS = {
         "timestamp", "source", "sentence_count", "word_count",
-        "bypass_reason", "k", "picked",
+        "bypass_reason", "k", "picked", "near_misses",
     }
     SIGNALS = {
-        "index", "score", "pain", "negation_hits",
+        "index", "score", "pain", "action", "negation_hits",
         "question", "number", "position", "header_bonus", "frequency",
     }
 
@@ -735,8 +880,8 @@ class ScoreLog(unittest.TestCase):
         self.assertEqual(record["word_count"], words_in(CORPUS["escalation"]))
         self.assertEqual(record["k"], len(record["picked"]))
 
-        for entry in record["picked"]:
-            self.assertEqual(set(entry), self.SIGNALS, "unexpected keys in a pick")
+        for entry in record["picked"] + record["near_misses"]:
+            self.assertEqual(set(entry), self.SIGNALS, "unexpected keys in an entry")
             self.assertNotIn("text", entry)
 
         # The strongest form of the promise: no sentence of the source appears

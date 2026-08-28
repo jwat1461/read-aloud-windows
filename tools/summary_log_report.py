@@ -16,7 +16,7 @@ DEFAULT_LOG = (
     Path(os.environ.get("APPDATA") or Path.home()) / "ReadAloud" / "summary_log.jsonl"
 )
 
-SIGNALS = ("pain", "question", "number", "position", "header_bonus",
+SIGNALS = ("pain", "action", "question", "number", "position", "header_bonus",
            "frequency", "negation_hits")
 
 
@@ -136,8 +136,9 @@ def main() -> int:
     section("What actually carried the picks")
     carried = collections.Counter()
     for pick in picks:
-        parts = {s: pick.get(s, 0.0) for s in ("pain", "question", "number",
-                                               "position", "header_bonus")}
+        parts = {s: pick.get(s, 0.0) for s in ("pain", "action", "question",
+                                               "number", "position",
+                                               "header_bonus")}
         cue = sum(parts.values())
         if cue <= 0:
             carried["frequency alone"] += 1
