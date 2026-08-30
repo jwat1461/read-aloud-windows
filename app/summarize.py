@@ -45,11 +45,14 @@ and are not a copy of everything you have ever put on the clipboard.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -62,12 +65,64 @@ RULES_PATH = _HOME / "summary_rules.json"
 # One JSON line per summarize() call. Scores without the sentences they scored
 # are the point: they are enough to see why something won and tune the weights,
 # and they are not a copy of everything you put on the clipboard.
-LOG_PATH = _HOME / "summary_log.jsonl"
-LOG_ROTATED = _HOME / "summary_log.1.jsonl"
+#
+# There is deliberately no module-level LOG_PATH. A writable global is a default
+# that every call site inherits silently, which is exactly how a test run ends
+# up appending to the user's real diary. The path is a parameter; callers that
+# want the usual place ask for it by name.
 LOG_MAX_BYTES = 5 * 1024 * 1024
+
+# The only sources a row may claim. "unknown" was retired: a row that cannot say
+# where it came from is untunable, so an unlabelled call is a bug, not a
+# category.
+SOURCES = ("hotkey", "queue", "app", "test")
+
+
+def default_log_path() -> Path:
+    """Where the log lives in a real install."""
+    return _HOME / "summary_log.jsonl"
 
 # One line, set when a user's rules file was brought forward to a newer version.
 upgrade_notes: list[str] = []
+
+
+@dataclass(frozen=True)
+class Budget:
+    """How long a summary may be, and when one is worth making.
+
+    Read from settings.json rather than baked in, because the log showed k
+    pinned at 8 starving a 104-sentence document: the ceiling was the bug, and a
+    ceiling you have to rebuild to move is one nobody moves.
+    """
+
+    ratio: float = 0.2
+    min_sentences: int = 3
+    max_sentences: int = 12
+    min_chars: int = 400
+
+    @classmethod
+    def from_settings(cls, values: dict | None = None) -> "Budget":
+        if values is None:
+            import settings as _settings
+
+            values = _settings.load()["brief"]
+        return cls(
+            ratio=float(values["ratio"]),
+            min_sentences=int(values["min_sentences"]),
+            max_sentences=int(values["max_sentences"]),
+            min_chars=int(values["min_chars"]),
+        )
+
+
+DEFAULT_BUDGET = Budget()
+
+# A brief that saves you one sentence is not worth the words that announce it.
+MIN_SENTENCES_SAVED = 2
+
+# How long an identical text stays "already briefed". In memory only: a cache of
+# what you have read that survives a restart is a reading history on disk, and
+# this app does not keep one.
+DUPLICATE_TTL_SECONDS = 600
 
 # How many losing sentences to record beside the winners. Three is enough to
 # see the margin without turning every line into a transcript of the document.
@@ -77,8 +132,9 @@ NEAR_MISS_COUNT = 3
 MIN_SENTENCES = 4
 MIN_WORDS = 60
 
-K_DIVISOR = 5
-K_MIN, K_MAX = 2, 8
+# How many losing sentences to record beside the winners is a log concern; how
+# many winners there are is a budget one, and the budget lives in settings.json
+# under "brief". Nothing here hardcodes a length any more.
 
 # A "short" line, for deciding whether something is a list rather than prose.
 LIST_SHORT_WORDS = 6
@@ -298,16 +354,16 @@ def _rotate(path: Path, rotated: Path) -> None:
 
 def log_run(
     record: dict,
-    path: Path | None = None,
+    path: Path,
     rotated: Path | None = None,
 ) -> None:
-    """Append one line. Never raises: a summary must not fail over its diary."""
-    path = LOG_PATH if path is None else path
-    rotated = (
-        (path.with_name("summary_log.1.jsonl") if path is not LOG_PATH else LOG_ROTATED)
-        if rotated is None
-        else rotated
-    )
+    """Append one line. Never raises: a summary must not fail over its diary.
+
+    `path` is required. It used to default to a module global, which meant any
+    call site that forgot it wrote to the user's real log -- including tests.
+    """
+    path = Path(path)
+    rotated = path.with_name(path.name.replace(".jsonl", ".1.jsonl")) if rotated is None else rotated
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         _rotate(path, rotated)
@@ -315,6 +371,40 @@ def log_run(
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     except (OSError, ValueError, TypeError):
         pass
+
+
+def log_weight_set(
+    log_path: Path,
+    source: str,
+    rules: dict | None = None,
+    budget: Budget | None = None,
+) -> dict:
+    """Write down which weights and budget this session is scoring with.
+
+    Once at startup, never per event. A log full of scores is only readable if
+    you know what the weights were when they were written, and a rules file that
+    was hand-edited three weeks ago is not something anyone reconstructs later.
+    One row per run is the cheapest way to make the rest of the log mean
+    something.
+    """
+    rules = load_rules() if rules is None else rules
+    budget = DEFAULT_BUDGET if budget is None else budget
+    record = {
+        "timestamp": now_iso(),
+        "event": "weights",
+        "source": source,
+        "weights": {k: float(v) for k, v in sorted(rules["weights"].items())},
+        "negation_window": int(rules["negation_window"]),
+        "rules_version": int(rules.get("version", 0)),
+        "budget": {
+            "ratio": budget.ratio,
+            "min_sentences": budget.min_sentences,
+            "max_sentences": budget.max_sentences,
+            "min_chars": budget.min_chars,
+        },
+    }
+    log_run(record, log_path)
+    return record
 
 
 def _log_sentence_text() -> bool:
@@ -366,6 +456,7 @@ def _record(
 
     return {
         "timestamp": now_iso(),
+        "event": "summary",
         "source": source,
         "sentence_count": len(sentences),
         "word_count": len(_WORD.findall(text.lower())),
@@ -483,12 +574,17 @@ def is_excluded_line(sentence: str) -> bool:
     return bool(_CODEY.search(stripped))
 
 
-def bypass_reason(text: str, sentences: list[str] | None = None) -> str | None:
+def bypass_reason(
+    text: str,
+    sentences: list[str] | None = None,
+    budget: Budget | None = None,
+) -> str | None:
     """Why this text should be read as-is, or None if it should be summarized.
 
     Returned rather than a bare bool so the caller can say what happened and the
     tests can assert on which rule fired.
     """
+    budget = DEFAULT_BUDGET if budget is None else budget
     if sentences is None:
         sentences = [piece for _s, _e, piece in chunks(text)]
 
@@ -498,17 +594,51 @@ def bypass_reason(text: str, sentences: list[str] | None = None) -> str | None:
         return "code"
     if looks_like_list(text):
         return "list"
+    # A brief of a paragraph is noise, and the announcement costs more words
+    # than it saves.
+    if len(text.strip()) < budget.min_chars:
+        return "too short"
     if len(sentences) < MIN_SENTENCES:
         return "too few sentences"
     if len(_WORD.findall(text.lower())) < MIN_WORDS:
         return "too few words"
-    if len(eligible_indexes(sentences)) < K_MIN:
+    if len(eligible_indexes(sentences)) < budget.min_sentences:
         return "nothing quotable"
     return None
 
 
-def should_summarize(text: str, sentences: list[str] | None = None) -> bool:
-    return bypass_reason(text, sentences) is None
+def should_summarize(
+    text: str,
+    sentences: list[str] | None = None,
+    budget: Budget | None = None,
+) -> bool:
+    return bypass_reason(text, sentences, budget) is None
+
+
+def looks_like_table(chosen: list[int], breakdown: list[dict]) -> bool:
+    """Do these picks read as rows of a table rather than sentences of prose?
+
+    A document whose winners are evenly spaced and mostly carrying the figure
+    bonus is a table, a price list or a schedule that happened to survive
+    sentence splitting. Summarising it reads out three arbitrary rows, which is
+    worse than reading the thing.
+
+    Two conditions, both required: more than half the picks carry the number
+    bonus, and their indices land on a near-regular stride. Ordinary prose that
+    mentions two figures fails the first; prose that clusters its numbers fails
+    the second.
+    """
+    if len(chosen) < 3:
+        return False  # two picks make one gap, and one gap is always "regular"
+
+    numeric = sum(1 for i in chosen if breakdown[i]["number"] > 0)
+    if numeric * 2 <= len(chosen):
+        return False
+
+    strides = [b - a for a, b in zip(chosen, chosen[1:])]
+    # "Near-regular" rather than equal: a table with one wrapped row still walks
+    # in step, and demanding exactness would only catch synthetic cases.
+    return max(strides) - min(strides) <= 1
 
 
 def eligible_indexes(sentences: list[str]) -> list[int]:
@@ -516,9 +646,16 @@ def eligible_indexes(sentences: list[str]) -> list[int]:
     return [i for i, s in enumerate(sentences) if not is_excluded_line(s)]
 
 
-def target_count(sentence_count: int) -> int:
-    """How many sentences a summary of this length should keep."""
-    return max(K_MIN, min(K_MAX, math.ceil(sentence_count / K_DIVISOR)))
+def target_count(sentence_count: int, budget: Budget | None = None) -> int:
+    """How many sentences a summary of this length should keep.
+
+    The multiply is rounded before the ceiling because 15 * 0.2 is 3.0000000000
+    000004 in binary floating point, and a budget that returns 4 for fifteen
+    sentences and 3 for fourteen is a bug nobody would ever look for.
+    """
+    budget = DEFAULT_BUDGET if budget is None else budget
+    scaled = math.ceil(round(sentence_count * budget.ratio, 9))
+    return max(budget.min_sentences, min(budget.max_sentences, scaled))
 
 
 # -------------------------------------------------------------------- scoring
@@ -738,43 +875,166 @@ def rank_sentences(sentences: list[str], rules: dict | None = None) -> list[floa
     return score_detail(sentences, rules)[0]
 
 
+@dataclass(frozen=True)
+class SummaryResult:
+    """What a summarizer decided, and enough to say it out loud.
+
+    `n_input` and `n_output` are what the spoken trailer counts, so the caller
+    never has to re-split anything to announce how much was cut.
+    """
+
+    sentences: list[str]
+    n_input: int
+    n_output: int
+    bypass: str | None = None
+
+    @property
+    def summarized(self) -> bool:
+        return self.bypass is None
+
+
+class Summarizer:
+    """The interface both callers hold. One implementation ships.
+
+    It exists so the hotkey and the queue cannot drift: both construct this and
+    call summarize(), and there is no second scoring path for either to take.
+    The Ollama tier in local_model.py sits in front of this in reading.plan(),
+    unchanged by this build.
+    """
+
+    def summarize(self, text: str) -> SummaryResult:  # pragma: no cover
+        raise NotImplementedError
+
+
+class ExtractiveSummarizer(Summarizer):
+    """Sentence selection by blended cue and Luhn score. The only one that ships.
+
+    Holds what a run needs and should not have to be passed twice: the tuning
+    rules, the budget, where the log goes, and what to call the caller. The
+    duplicate cache lives on the instance, so the app's single long-lived
+    summarizer remembers across presses while every test gets a clean one.
+    """
+
+    def __init__(
+        self,
+        log_path: Path,
+        source: str,
+        rules: dict | None = None,
+        budget: Budget | None = None,
+        clock=None,
+    ) -> None:
+        if source not in SOURCES:
+            raise ValueError(f"source {source!r} is not one of {SOURCES}")
+        self.log_path = Path(log_path)
+        self.source = source
+        self.rules = rules
+        self.budget = DEFAULT_BUDGET if budget is None else budget
+        self._clock = time.monotonic if clock is None else clock
+        self._seen: dict[str, float] = {}
+
+    # ------------------------------------------------------------ duplicates
+
+    def _fingerprint(self, text: str) -> str:
+        """A hash, never the text. The cache must not become a reading history."""
+        return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+    def _is_repeat(self, text: str) -> bool:
+        now = self._clock()
+        digest = self._fingerprint(text)
+        # Drop anything stale first, so the dict cannot grow without bound in a
+        # session that briefs all day.
+        self._seen = {
+            key: seen
+            for key, seen in self._seen.items()
+            if now - seen < DUPLICATE_TTL_SECONDS
+        }
+        repeat = digest in self._seen
+        self._seen[digest] = now
+        return repeat
+
+    # ---------------------------------------------------------------- public
+
+    def summarize(self, text: str) -> SummaryResult:
+        """Return the sentences worth hearing, in the order they were written.
+
+        Anything that should be read as-is comes back whole. Everything else
+        comes back as the top-scoring eligible sentences, re-sorted into source
+        order so the summary still reads forwards.
+
+        Every call writes one line to the log, bypasses included: "it decided
+        not to bother, and here is which rule said so" is exactly as useful when
+        tuning as a list of picks.
+        """
+        sentences = [piece for _s, _e, piece in chunks(text)]
+        if not sentences:
+            self._log(text, sentences, "empty", [], [], [], None)
+            return SummaryResult([], 0, 0, "empty")
+
+        # Before scoring: re-reading the same thing is the one bypass that does
+        # not depend on what the text says.
+        if self._is_repeat(text):
+            self._log(text, sentences, "duplicate", [], [], [], None)
+            return SummaryResult(sentences, len(sentences), len(sentences),
+                                 "duplicate")
+
+        reason = bypass_reason(text, sentences, self.budget)
+        if reason is not None:
+            self._log(text, sentences, reason, [], [], [], None)
+            return SummaryResult(sentences, len(sentences), len(sentences), reason)
+
+        eligible = eligible_indexes(sentences)
+        scores, breakdown = score_detail(sentences, self.rules)
+        keep = target_count(len(eligible), self.budget)
+
+        # Index breaks ties, so an even score never depends on sort order.
+        order = sorted(eligible, key=lambda i: (-scores[i], i))
+        chosen = sorted(order[:keep])
+        missed = order[keep:keep + NEAR_MISS_COUNT]
+
+        # Both of these are only knowable once the picks exist, so they are
+        # checked here rather than up in bypass_reason().
+        after = None
+        if looks_like_table(chosen, breakdown):
+            after = "table"
+        elif len(sentences) - len(chosen) < MIN_SENTENCES_SAVED:
+            # A brief that is not meaningfully shorter is noise too.
+            after = "not shorter"
+
+        if after is not None:
+            self._log(text, sentences, after, [], [], [], None)
+            return SummaryResult(sentences, len(sentences), len(sentences), after)
+
+        self._log(text, sentences, None, chosen, scores, breakdown, keep,
+                  missed=missed)
+        picked = [sentences[i] for i in chosen]
+        return SummaryResult(picked, len(sentences), len(picked), None)
+
+    def _log(self, text, sentences, reason, chosen, scores, breakdown, keep,
+             missed=None) -> None:
+        log_run(
+            _record(text, sentences, reason, chosen, scores, breakdown, keep,
+                    self.source, missed=missed),
+            self.log_path,
+        )
+
+
 def summarize(
     text: str,
     rules: dict | None = None,
-    source: str = "unknown",
+    source: str = "test",
     log_path: Path | None = None,
+    budget: Budget | None = None,
 ) -> list[str]:
-    """Return the sentences worth hearing, in the order they were written.
+    """Sentences only, for callers that do not need the counts.
 
-    Anything that should be read as-is comes back whole. Everything else comes
-    back as the top-scoring eligible sentences, re-sorted into source order so
-    the summary still reads forwards.
-
-    Every call writes one line to the log, bypasses included: "it decided not to
-    bother, and here is which rule said so" is exactly as useful when tuning as
-    a list of picks.
+    Kept because the tuning tools and most tests want a plain list. It builds a
+    throwaway summarizer, so it has no duplicate memory -- scoring the same
+    fixture twice in a row must give the same answer twice.
     """
-    sentences = [piece for _s, _e, piece in chunks(text)]
-    reason = bypass_reason(text, sentences) if sentences else "empty"
-
-    if reason is not None:
-        log_run(
-            _record(text, sentences, reason, [], [], [], None, source), log_path
-        )
-        return sentences
-
-    eligible = eligible_indexes(sentences)
-    scores, breakdown = score_detail(sentences, rules)
-    keep = target_count(len(eligible))
-
-    # Index breaks ties, so an even score never depends on sort implementation.
-    order = sorted(eligible, key=lambda i: (-scores[i], i))
-    chosen = sorted(order[:keep])
-    missed = order[keep:keep + NEAR_MISS_COUNT]
-
-    log_run(
-        _record(text, sentences, None, chosen, scores, breakdown, keep, source,
-                missed=missed),
-        log_path,
-    )
-    return [sentences[i] for i in chosen]
+    result = ExtractiveSummarizer(
+        log_path=default_log_path() if log_path is None else log_path,
+        source=source,
+        rules=rules,
+        budget=budget,
+    ).summarize(text)
+    return result.sentences

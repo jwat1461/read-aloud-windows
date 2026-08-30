@@ -76,6 +76,7 @@ way. From then on, in **any** application:
 | `Ctrl+Alt+C` | Read whatever is on the clipboard |
 | `Ctrl+Alt+A` | Auto-read the clipboard — on / off |
 | `Ctrl+Alt+S` | Summary mode — on / off |
+| `Ctrl+Alt+B` | Brief the selection **once**, without changing the mode |
 | `Ctrl+Alt+F` | Read the full untrimmed source of the current item |
 | `Ctrl+Alt+N` | Skip to the next queued item |
 | `Ctrl+Alt+P` | Pause / resume |
@@ -92,7 +93,7 @@ anything else. Toggling says "on" or "off" out loud so you know it took, and the
 switch is remembered in `settings.json` like everything else, so it survives a
 restart. Copies queue in the order you made them: a new copy waits its turn
 rather than cutting the current one off, `Ctrl+Alt+N` skips to the next,
-`Ctrl+Alt+P` holds the line, and `Ctrl+Alt+S` is the only thing that empties it.
+`Ctrl+Alt+P` holds the line, and `Ctrl+Alt+X` is the only thing that empties it.
 Twenty items can be waiting; past that the oldest unread one is dropped.
 Anything longer than 20,000 characters (`auto_read_max_chars` in the settings
 file) is read up to that point and finished with "and more". Hover the tray icon
@@ -137,6 +138,34 @@ was last played, and works with the mode off too, where it is simply a re-read.
 Nothing is written. Sentences are **chosen**, never generated, so every word you
 hear appeared in the text you copied — which is a promise a language model
 cannot make, and the reason the default engine is not one.
+
+### Brief me — one summary, on demand
+
+`Ctrl+Alt+S` is a mode: it changes everything you hear until you turn it off.
+Often that is not what you want. You want *this* passage summarized, once, and
+everything after it read normally.
+
+Press `Ctrl+Alt+B`, or pick **Brief me** from the tray menu, and the selection is
+captured exactly the way `Ctrl+Alt+R` captures it, summarized, and spoken as a
+brief. Summary mode is left exactly where it was. The brief opens with
+**"Brief:"** and closes with **"End of brief. 4 sentences from 22."**, so you
+know both that text was cut and how much of it. Anything already playing is
+interrupted the way `Ctrl+Alt+F` interrupts — the auto-read queue keeps its
+place and carries on once the brief finishes.
+
+It is the same scorer the queue uses, so a passage briefs identically however you
+ask for it. Four things send text through unsummarized and read it as it is:
+
+- shorter than 400 characters — a brief of a paragraph is noise
+- a summary that would not be at least two sentences shorter than the source
+- a table: evenly spaced picks that nearly all carry a figure, which is a price
+  list or a schedule rather than prose
+- the same text again within ten minutes, which says **"Same as the last brief"**
+  instead of reading the identical summary twice
+
+The duplicate window is in memory only and never written down: a record of what
+you have read that survived a restart would be a reading history, and this app
+does not keep one.
 
 Some things are read as they arrived, with no cue: anything under four sentences
 or sixty words, source code, a bare URL, and a list of short lines. Inside
@@ -226,6 +255,8 @@ tier, and the reason the default is a summarizer that cannot stall at all.
 - **Volume** — Mute · 25% · 50% · 75% · 100%
 - **Auto-read clipboard** — tick it and every copy is read; `Ctrl+Alt+A`
 - **Summary mode** — tick it and you hear the pain points only; `Ctrl+Alt+S`
+- **Brief me** — summarize the clipboard once, leaving the mode alone;
+  `Ctrl+Alt+B`
 - Read selection · Read clipboard · Read full text · Pause · Skip to next · **Stop reading**
 - Open Read Aloud · Quit
 
@@ -387,7 +418,8 @@ start their own HTTP server on 127.0.0.1 and point the client at it, so the
 connection, both timeouts and the JSON handling are genuinely exercised rather
 than mocked. The corpus snapshot in `app/test_summary_snapshot.json` records
 what the summarizer picks and fails on any drift; regenerate it deliberately
-with `python toolsesnapshot.py` and read the diff before committing it.
+with `python tools
+esnapshot.py` and read the diff before committing it.
 
 The `engine`, `app` and `global` suites make sound (at low volume) and briefly
 open windows, because they exercise the real speech engine rather than a mock.

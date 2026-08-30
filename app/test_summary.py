@@ -8,6 +8,7 @@ fast alongside `chunker` and `parity`.
 """
 
 import json
+import re
 import socket
 import tempfile
 import unittest
@@ -60,6 +61,27 @@ SHORT_THREE_SENTENCES = (
     "The build failed again this morning after the overnight deploy went out. "
     "Nobody on the team has been able to reproduce it on their own machine. "
     "We are blocked until someone can say what actually changed in that release."
+)
+
+# Three sentences, but past 400 characters, so "too few sentences" is reached
+# rather than being masked by the min_chars rule in front of it.
+THREE_LONG_SENTENCES = (
+    "The overnight build failed again this morning shortly after the scheduled "
+    "deployment went out to the staging cluster, and the logs stop without an "
+    "error. Nobody on the platform team has been able to reproduce the fault "
+    "on their own machine, even running the identical commit and the same "
+    "container image. We are blocked until somebody can say what actually "
+    "changed in that release, because the diff looks empty from here."
+)
+
+# Comfortably past every size bypass, for asserting the boundary from above.
+LONG_ENOUGH_PROSE = (
+    "The reporting rebuild slipped again this week and nobody has told the "
+    "client yet. The schema sign-off is still sitting with the data team and "
+    "has not moved in nine days. We are paying for both environments while "
+    "this drags on, which is money we agreed to stop spending. The deadline "
+    "was Friday and it is already Tuesday afternoon. Somebody really needs to "
+    "make a call today about what ships and what waits."
 )
 
 CODE_FIXTURE = """def read_aloud(text):
@@ -177,12 +199,13 @@ def setUpModule():
     """Point the log at a scratch file. Without this the suite would append
     thousands of lines to the user's real summary_log.jsonl."""
     global _REAL_LOG
-    _REAL_LOG = summarize.LOG_PATH
-    summarize.LOG_PATH = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+    _REAL_LOG = summarize.default_log_path
+    scratch = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+    summarize.default_log_path = lambda: scratch
 
 
 def tearDownModule():
-    summarize.LOG_PATH = _REAL_LOG
+    summarize.default_log_path = _REAL_LOG
 
 
 def fresh_rules():
@@ -195,26 +218,48 @@ class Bypasses(unittest.TestCase):
     def setUp(self):
         self.rules = fresh_rules()
 
-    def test_three_sentences_are_left_alone(self):
-        self.assertEqual(len(sentences_of(SHORT_THREE_SENTENCES)), 3)
+    def test_under_four_hundred_characters_is_left_alone(self):
+        """The headline rule: a brief of a paragraph is noise."""
+        text = LONG_ENOUGH_PROSE
+        self.assertGreaterEqual(len(text), 400)
+        self.assertIsNone(summarize.bypass_reason(text))
+
+        short = text[:390].rsplit(".", 1)[0] + "."
+        self.assertLess(len(short), 400)
+        self.assertEqual(summarize.bypass_reason(short), "too short")
         self.assertEqual(
-            summarize.bypass_reason(SHORT_THREE_SENTENCES), "too few sentences"
+            summarize.summarize(short, self.rules), sentences_of(short)
+        )
+
+    def test_three_sentences_are_left_alone(self):
+        """Long enough to clear min_chars, so the sentence rule is the one
+        under test rather than being masked by it."""
+        self.assertEqual(len(sentences_of(THREE_LONG_SENTENCES)), 3)
+        self.assertGreaterEqual(len(THREE_LONG_SENTENCES), 400)
+        self.assertEqual(
+            summarize.bypass_reason(THREE_LONG_SENTENCES), "too few sentences"
         )
         self.assertEqual(
-            summarize.summarize(SHORT_THREE_SENTENCES, self.rules),
-            sentences_of(SHORT_THREE_SENTENCES),
+            summarize.summarize(THREE_LONG_SENTENCES, self.rules),
+            sentences_of(THREE_LONG_SENTENCES),
         )
 
     def test_fifty_nine_words_are_left_alone_and_sixty_are_not(self):
-        filler = "The report is late and the client is asking about it again. "
+        """Long words, so the text clears 400 characters well before it clears
+        60 words and the word rule is still reachable."""
+        filler = (
+            "Comprehensive infrastructure reconfiguration documentation "
+            "requires substantial administrative coordination. "
+        )
         under = ""
         while words_in(under + filler) <= 59:
             under += filler
         self.assertLessEqual(words_in(under), 59)
         self.assertGreaterEqual(len(sentences_of(under)), 4)
+        self.assertGreaterEqual(len(under), 400, "min_chars would mask this")
         self.assertEqual(summarize.bypass_reason(under), "too few words")
 
-        over = under + filler
+        over = under + filler + filler
         self.assertGreaterEqual(words_in(over), 60)
         self.assertIsNone(summarize.bypass_reason(over), "did not engage at 60 words")
 
@@ -285,13 +330,39 @@ class Selection(unittest.TestCase):
             summarize.target_count(len(eligible)),
         )
 
-    def test_k_clamps_at_two_and_at_eight(self):
-        self.assertEqual(summarize.target_count(1), 2)
-        self.assertEqual(summarize.target_count(4), 2)
-        self.assertEqual(summarize.target_count(10), 2)
-        self.assertEqual(summarize.target_count(11), 3)
+    def test_k_clamps_at_the_budget_floor_and_ceiling(self):
+        """Defaults come from settings now: ratio 0.2, floor 3, ceiling 12."""
+        self.assertEqual(summarize.target_count(1), 3)
+        self.assertEqual(summarize.target_count(4), 3)
+        self.assertEqual(summarize.target_count(15), 3)
+        self.assertEqual(summarize.target_count(16), 4)
         self.assertEqual(summarize.target_count(40), 8)
-        self.assertEqual(summarize.target_count(4000), 8)
+        self.assertEqual(summarize.target_count(60), 12)
+        self.assertEqual(summarize.target_count(4000), 12)
+
+    def test_the_ceiling_no_longer_starves_a_long_document(self):
+        """The reason the ceiling moved: 8 was pinning a 104-sentence read."""
+        self.assertEqual(summarize.target_count(104), 12)
+
+    def test_a_custom_budget_is_honoured_end_to_end(self):
+        tight = summarize.Budget(ratio=0.5, min_sentences=1, max_sentences=2,
+                                 min_chars=0)
+        self.assertEqual(summarize.target_count(10, tight), 2)
+        picks = summarize.summarize(CORPUS["escalation"], self.rules,
+                                    budget=tight)
+        self.assertEqual(len(picks), 2)
+
+    def test_the_ratio_does_not_drift_on_floating_point(self):
+        """15 * 0.2 is 3.0000000000000004 in binary; ceil() must not see that."""
+        self.assertEqual(summarize.target_count(15), 3)
+        for n in range(1, 400):
+            budget = summarize.Budget(ratio=0.2, min_sentences=1,
+                                      max_sentences=9999, min_chars=0)
+            self.assertEqual(
+                summarize.target_count(n, budget),
+                -(-n // 5),
+                f"drifted at n={n}",
+            )
 
     def test_k_is_honoured_on_a_real_fixture(self):
         text = " ".join(CORPUS.values())
@@ -456,10 +527,16 @@ class HeaderInheritance(unittest.TestCase):
             self.rules, weights=dict(self.rules["weights"], header_weight=0.0)
         )
 
+        # A budget of its own: this test is about the header weight, and a
+        # floor high enough to select every candidate would hide the effect
+        # behind a k that keeps them all regardless of score.
+        budget = summarize.Budget(ratio=0.2, min_sentences=2, max_sentences=8,
+                                  min_chars=0)
+
         def picked_indexes(rules):
             scores = summarize.rank_sentences(sentences, rules)
             eligible = summarize.eligible_indexes(sentences)
-            keep = summarize.target_count(len(eligible))
+            keep = summarize.target_count(len(eligible), budget)
             order = sorted(eligible, key=lambda i: (-scores[i], i))
             return sorted(order[:keep])
 
@@ -844,7 +921,7 @@ class ScoreLog(unittest.TestCase):
     """One line per call, saying why -- without keeping the text."""
 
     KEYS = {
-        "timestamp", "source", "sentence_count", "word_count",
+        "timestamp", "event", "source", "sentence_count", "word_count",
         "bypass_reason", "k", "picked", "near_misses",
     }
     SIGNALS = {
@@ -898,14 +975,16 @@ class ScoreLog(unittest.TestCase):
             self.assertEqual(len(self._lines()), count)
 
     def test_a_bypass_is_logged_too_and_says_which_rule_fired(self):
-        for text in (SHORT_THREE_SENTENCES, CODE_FIXTURE, URL_FIXTURE, LIST_FIXTURE):
+        fixtures = (SHORT_THREE_SENTENCES, THREE_LONG_SENTENCES, CODE_FIXTURE,
+                    URL_FIXTURE, LIST_FIXTURE)
+        for text in fixtures:
             summarize.summarize(text, self.rules, source="hotkey", log_path=self.log)
 
         records = self._lines()
-        self.assertEqual(len(records), 4)
+        self.assertEqual(len(records), len(fixtures))
         self.assertEqual(
             [r["bypass_reason"] for r in records],
-            ["too few sentences", "code", "url", "list"],
+            ["too short", "too few sentences", "code", "url", "list"],
         )
         for record in records:
             self.assertIsNone(record["k"])
@@ -1016,6 +1095,484 @@ class Snapshot(unittest.TestCase):
                 recorded[name]["picked"],
                 f"{name}: the summarizer now picks different sentences",
             )
+
+
+# A price list that survived sentence splitting: evenly spaced, every line
+# carrying a figure. The number bonus makes these the top picks, and reading
+# three arbitrary rows aloud is worse than reading the table.
+TABLE_FIXTURE = (
+    "The Q3 hardware refresh budget is broken down by site below. "
+    "Fort Lauderdale ordered 42 units at $1,150 each in January. "
+    "The rollout there finished ahead of the internal schedule. "
+    "Charlotte ordered 38 units at $1,150 each in February. "
+    "The rollout there finished ahead of the internal schedule. "
+    "Nashville ordered 51 units at $1,150 each in March. "
+    "The rollout there finished ahead of the internal schedule. "
+    "Richmond ordered 47 units at $1,150 each in April. "
+    "The rollout there finished ahead of the internal schedule. "
+    "Totals will be reconciled once the last invoice clears."
+)
+
+# Ordinary prose that happens to quote two figures. Must not read as a table.
+TWO_NUMBERS_PROSE = (
+    "The reporting rebuild slipped again this week and nobody has told the "
+    "client yet, which is the part that worries me most. The schema sign-off "
+    "is still sitting with the data team and has not moved in nine days. "
+    "We are paying $4,000 a month to keep both environments alive while this "
+    "drags on, which is money we agreed to stop spending in June. Everyone "
+    "involved agrees the current arrangement cannot continue much longer. "
+    "The deadline was Friday and it is already Tuesday afternoon. Somebody "
+    "needs to make a call today about what ships and what waits."
+)
+
+
+class BriefInterface(unittest.TestCase):
+    """One scorer, reached through the interface both callers hold."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+    def make(self, source="test", budget=None, clock=None):
+        return summarize.ExtractiveSummarizer(
+            log_path=self.log, source=source, rules=self.rules,
+            budget=budget, clock=clock,
+        )
+
+    def test_the_shipped_summarizer_is_the_interface(self):
+        self.assertTrue(issubclass(summarize.ExtractiveSummarizer,
+                                   summarize.Summarizer))
+
+    def test_a_result_reports_both_counts(self):
+        text = CORPUS["escalation"]
+        result = self.make().summarize(text)
+        self.assertEqual(result.n_input, len(sentences_of(text)))
+        self.assertEqual(result.n_output, len(result.sentences))
+        self.assertLess(result.n_output, result.n_input)
+        self.assertTrue(result.summarized)
+        self.assertIsNone(result.bypass)
+
+    def test_an_unknown_source_is_refused(self):
+        """"unknown" was retired: a row that cannot say where it came from is
+        untunable, so it must not be constructible."""
+        with self.assertRaises(ValueError):
+            self.make(source="unknown")
+        for legal in summarize.SOURCES:
+            self.make(source=legal)
+
+    def test_output_preserves_document_order(self):
+        text = CORPUS["escalation"]
+        result = self.make().summarize(text)
+        original = sentences_of(text)
+        positions = [original.index(s) for s in result.sentences]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_every_output_sentence_appears_verbatim_in_the_input(self):
+        """The property that makes the privacy claim checkable: extractive
+        means chosen, never written."""
+        for name, text in CORPUS.items():
+            result = self.make().summarize(text)
+            original = sentences_of(text)
+            for sentence in result.sentences:
+                self.assertIn(sentence, original, f"{name} invented a sentence")
+
+    def test_empty_and_whitespace_only_do_not_crash(self):
+        for text in ("", "   ", "\n\n\t  \n"):
+            result = self.make().summarize(text)
+            self.assertEqual(result.bypass, "empty")
+            self.assertEqual(result.sentences, [])
+            self.assertEqual(result.n_input, 0)
+
+    def test_a_short_passage_comes_back_untouched(self):
+        short = "The build failed. Nobody knows why. We are blocked."
+        result = self.make().summarize(short)
+        self.assertEqual(result.bypass, "too short")
+        self.assertEqual(result.sentences, sentences_of(short))
+
+    def test_a_brief_that_saves_less_than_two_sentences_is_refused(self):
+        """Not meaningfully shorter is noise too."""
+        text = CORPUS["escalation"]
+        sentences = sentences_of(text)
+        # A floor high enough that k lands within one of the input count.
+        budget = summarize.Budget(
+            ratio=1.0, min_sentences=len(sentences) - 1,
+            max_sentences=len(sentences), min_chars=0,
+        )
+        result = self.make(budget=budget).summarize(text)
+        self.assertEqual(result.bypass, "not shorter")
+        self.assertEqual(result.sentences, sentences)
+
+
+class TableGuard(unittest.TestCase):
+    """Evenly spaced numeric picks are a table read as prose."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+    def make(self):
+        return summarize.ExtractiveSummarizer(
+            log_path=self.log, source="test", rules=self.rules
+        )
+
+    def test_a_strided_numeric_document_is_bypassed_as_a_table(self):
+        result = self.make().summarize(TABLE_FIXTURE)
+        self.assertEqual(result.bypass, "table")
+        self.assertEqual(result.sentences, sentences_of(TABLE_FIXTURE))
+
+    def test_ordinary_prose_with_two_numbers_is_still_summarized(self):
+        result = self.make().summarize(TWO_NUMBERS_PROSE)
+        self.assertIsNone(result.bypass, "the table guard fired on prose")
+        self.assertLess(result.n_output, result.n_input)
+
+    def test_the_guard_needs_both_conditions(self):
+        numeric = [{"number": 0.7} for _ in range(6)]
+        plain = [{"number": 0.0} for _ in range(6)]
+        # Strided and numeric: a table.
+        self.assertTrue(summarize.looks_like_table([0, 2, 4], numeric))
+        # Strided but not numeric: prose that happens to be evenly spread.
+        self.assertFalse(summarize.looks_like_table([0, 2, 4], plain))
+        # Numeric but clustered: prose that quotes its figures together.
+        self.assertFalse(summarize.looks_like_table([0, 1, 5], numeric))
+
+    def test_two_picks_are_never_a_table(self):
+        """One gap is always regular; two picks cannot establish a stride."""
+        numeric = [{"number": 0.7} for _ in range(6)]
+        self.assertFalse(summarize.looks_like_table([0, 3], numeric))
+
+
+class Duplicates(unittest.TestCase):
+    """The same text twice inside the window is not briefed twice."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+        self.now = 1000.0
+
+    def make(self, source="test"):
+        return summarize.ExtractiveSummarizer(
+            log_path=self.log, source=source, rules=self.rules,
+            clock=lambda: self.now,
+        )
+
+    def test_a_repeat_inside_the_window_is_bypassed(self):
+        scorer = self.make()
+        first = scorer.summarize(CORPUS["escalation"])
+        self.assertIsNone(first.bypass)
+
+        self.now += 60
+        second = scorer.summarize(CORPUS["escalation"])
+        self.assertEqual(second.bypass, "duplicate")
+        self.assertEqual(second.sentences, sentences_of(CORPUS["escalation"]))
+
+    def test_after_the_window_it_is_briefed_again(self):
+        scorer = self.make()
+        first = scorer.summarize(CORPUS["escalation"])
+        self.now += summarize.DUPLICATE_TTL_SECONDS + 1
+        again = scorer.summarize(CORPUS["escalation"])
+        self.assertIsNone(again.bypass, "the window did not expire")
+        self.assertEqual(again.sentences, first.sentences)
+
+    def test_a_different_text_is_not_a_duplicate(self):
+        scorer = self.make()
+        scorer.summarize(CORPUS["escalation"])
+        other = scorer.summarize(CORPUS["meeting"])
+        self.assertIsNone(other.bypass)
+
+    def test_the_duplicate_is_logged_with_its_reason(self):
+        scorer = self.make()
+        scorer.summarize(CORPUS["escalation"])
+        scorer.summarize(CORPUS["escalation"])
+        rows = [json.loads(line)
+                for line in self.log.read_text("utf-8").splitlines() if line.strip()]
+        self.assertEqual([r["bypass_reason"] for r in rows], [None, "duplicate"])
+
+    def test_the_window_does_not_grow_without_bound(self):
+        scorer = self.make()
+        for i in range(5):
+            scorer.summarize(f"{CORPUS['escalation']} Variation {i}.")
+            self.now += summarize.DUPLICATE_TTL_SECONDS + 1
+        self.assertLessEqual(len(scorer._seen), 1, "stale entries were kept")
+
+    def test_the_cache_holds_no_text(self):
+        """A cache of what you have read is a reading history; this one is
+        hashes only."""
+        scorer = self.make()
+        scorer.summarize(CORPUS["escalation"])
+        for key in scorer._seen:
+            self.assertRegex(key, r"^[0-9a-f]{64}$")
+
+
+class BudgetFromSettings(unittest.TestCase):
+    """The budget lives in settings.json, and both paths read it."""
+
+    def test_defaults_match_the_settings_defaults(self):
+        budget = summarize.Budget.from_settings(settings.BRIEF_DEFAULTS)
+        self.assertEqual(budget.ratio, 0.2)
+        self.assertEqual(budget.min_sentences, 3)
+        self.assertEqual(budget.max_sentences, 12)
+        self.assertEqual(budget.min_chars, 400)
+
+    def test_a_settings_budget_changes_how_much_is_kept(self):
+        rules = fresh_rules()
+        log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+        wide = summarize.Budget.from_settings(
+            {"ratio": 0.9, "min_sentences": 1, "max_sentences": 99, "min_chars": 0}
+        )
+        narrow = summarize.Budget.from_settings(
+            {"ratio": 0.1, "min_sentences": 1, "max_sentences": 2, "min_chars": 0}
+        )
+        text = CORPUS["escalation"]
+        many = summarize.ExtractiveSummarizer(
+            log_path=log, source="test", rules=rules, budget=wide
+        ).summarize(text)
+        few = summarize.ExtractiveSummarizer(
+            log_path=log, source="test", rules=rules, budget=narrow
+        ).summarize(text)
+        self.assertGreater(many.n_output, few.n_output)
+
+
+class LogHygiene(unittest.TestCase):
+    """The log is scores, not a transcript."""
+
+    ALLOWED_STRINGS = {
+        "hotkey", "queue", "app", "test", "summary", "weights", "extractive",
+        "ollama", "url", "code", "list", "table", "duplicate", "empty",
+        "too short", "too few sentences", "too few words", "nothing quotable",
+        "not shorter",
+    }
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+        # This asserts the default contract, so it must not depend on whether
+        # the machine running it has the opt-in text logging switched on.
+        self._real = summarize._log_sentence_text
+        summarize._log_sentence_text = lambda: False
+
+    def tearDown(self):
+        summarize._log_sentence_text = self._real
+
+    def _rows(self):
+        return [json.loads(line)
+                for line in self.log.read_text("utf-8").splitlines() if line.strip()]
+
+    def _values(self, value, found):
+        """Every string *value* in the row. Keys are structure, not content:
+        a key named "budget" is the schema, and the contract is that values
+        carry nothing but numbers and the enumerated strings."""
+        if isinstance(value, dict):
+            for item in value.values():
+                self._values(item, found)
+        elif isinstance(value, list):
+            for item in value:
+                self._values(item, found)
+        elif isinstance(value, str):
+            found.add(value)
+        return found
+
+    def _keys(self, value, found):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                found.add(key)
+                self._keys(item, found)
+        elif isinstance(value, list):
+            for item in value:
+                self._keys(item, found)
+        return found
+
+    def test_no_row_carries_input_or_summary_text(self):
+        scorer = summarize.ExtractiveSummarizer(
+            log_path=self.log, source="hotkey", rules=self.rules
+        )
+        summarize.log_weight_set(self.log, "hotkey", rules=self.rules)
+        for text in (CORPUS["escalation"], CORPUS["meeting"], CODE_FIXTURE,
+                     URL_FIXTURE, TABLE_FIXTURE, SHORT_THREE_SENTENCES):
+            scorer.summarize(text)
+        scorer.summarize(CORPUS["escalation"])  # and a duplicate
+
+        rows = self._rows()
+        self.assertGreater(len(rows), 5)
+
+        # No sentence of any fixture may appear anywhere in the log, and no
+        # value may be a string the schema does not enumerate.
+        corpus_sentences = set()
+        for text in (CORPUS["escalation"], CORPUS["meeting"], TABLE_FIXTURE):
+            for sentence in sentences_of(text):
+                corpus_sentences.add(sentence.lower())
+
+        for row in rows:
+            for value in self._values(row, set()):
+                if value in self.ALLOWED_STRINGS:
+                    continue
+                # Timestamps are the only other free-form string value.
+                if re.fullmatch(r"[0-9T:.+\-]{10,40}Z?", value):
+                    continue
+                self.fail(f"unenumerated string value in log: {value[:40]!r}")
+
+        # And nothing anywhere in the row -- key or value -- is a sentence or a
+        # distinctive word out of the text that was scored.
+        for row in rows:
+            everything = self._values(row, set()) | self._keys(row, set())
+            for token in everything:
+                self.assertNotIn(
+                    token.lower(), corpus_sentences,
+                    f"log row leaked a sentence: {token[:30]!r}",
+                )
+
+    def test_every_row_names_a_legal_source(self):
+        """A row emitted without an explicit source is a bug."""
+        scorer = summarize.ExtractiveSummarizer(
+            log_path=self.log, source="queue", rules=self.rules
+        )
+        summarize.log_weight_set(self.log, "queue", rules=self.rules)
+        scorer.summarize(CORPUS["escalation"])
+        scorer.summarize(SHORT_THREE_SENTENCES)
+        for row in self._rows():
+            self.assertIn("source", row, "row had no source")
+            self.assertIn(row["source"], summarize.SOURCES)
+            self.assertNotEqual(row["source"], "unknown")
+
+    def test_near_misses_are_still_recorded(self):
+        """The tuning data the amendment asked to keep exactly as it was."""
+        scorer = summarize.ExtractiveSummarizer(
+            log_path=self.log, source="test", rules=self.rules
+        )
+        scorer.summarize(CORPUS["escalation"])
+        row = self._rows()[0]
+        self.assertIn("near_misses", row)
+        self.assertTrue(row["near_misses"])
+        for entry in row["near_misses"]:
+            self.assertIn("index", entry)
+            self.assertIn("score", entry)
+            self.assertNotIn("text", entry)
+
+
+class StartupWeightLog(unittest.TestCase):
+    """Which weights the rest of the log was scored with, written once."""
+
+    def setUp(self):
+        self.rules = fresh_rules()
+        self.log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+
+    def test_the_weight_set_is_recorded(self):
+        record = summarize.log_weight_set(self.log, "hotkey", rules=self.rules)
+        self.assertEqual(record["event"], "weights")
+        self.assertEqual(record["source"], "hotkey")
+        self.assertEqual(
+            set(record["weights"]), set(self.rules["weights"])
+        )
+        self.assertEqual(record["budget"]["max_sentences"], 12)
+
+    def test_it_is_one_row_and_is_not_a_call(self):
+        summarize.log_weight_set(self.log, "hotkey", rules=self.rules)
+        rows = [json.loads(line)
+                for line in self.log.read_text("utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("picked", rows[0])
+        self.assertNotIn("bypass_reason", rows[0])
+
+    def test_scoring_rows_are_marked_apart_from_it(self):
+        summarize.log_weight_set(self.log, "hotkey", rules=self.rules)
+        summarize.ExtractiveSummarizer(
+            log_path=self.log, source="hotkey", rules=self.rules
+        ).summarize(CORPUS["escalation"])
+        rows = [json.loads(line)
+                for line in self.log.read_text("utf-8").splitlines() if line.strip()]
+        self.assertEqual([r["event"] for r in rows], ["weights", "summary"])
+
+
+class BriefSettingsFile(unittest.TestCase):
+    """The budget section: absent, malformed, or hand-edited."""
+
+    def setUp(self):
+        self.real = settings.SETTINGS_PATH
+        self.path = Path(tempfile.mkdtemp()) / "settings.json"
+        settings.SETTINGS_PATH = self.path
+
+    def tearDown(self):
+        settings.SETTINGS_PATH = self.real
+
+    def write(self, payload):
+        self.path.write_text(json.dumps(payload), "utf-8")
+
+    def test_a_missing_file_gives_the_defaults(self):
+        values = settings.load()
+        self.assertEqual(values["brief"], settings.BRIEF_DEFAULTS)
+        self.assertEqual(settings.warnings, [])
+
+    def test_a_missing_brief_section_gives_the_defaults(self):
+        self.write({"voice": "Zira", "rate": 2})
+        values = settings.load()
+        self.assertEqual(values["brief"], settings.BRIEF_DEFAULTS)
+        self.assertEqual(values["voice"], "Zira", "unrelated keys were lost")
+        self.assertEqual(settings.warnings, [])
+
+    def test_a_partial_brief_section_keeps_the_rest_of_the_defaults(self):
+        self.write({"brief": {"max_sentences": 6}})
+        brief = settings.load()["brief"]
+        self.assertEqual(brief["max_sentences"], 6)
+        self.assertEqual(brief["ratio"], settings.BRIEF_DEFAULTS["ratio"])
+        self.assertEqual(brief["min_chars"], settings.BRIEF_DEFAULTS["min_chars"])
+        self.assertEqual(settings.warnings, [])
+
+    def test_a_malformed_value_falls_back_for_that_key_alone(self):
+        self.write({"brief": {"ratio": "banana", "max_sentences": 7}})
+        brief = settings.load()["brief"]
+        self.assertEqual(brief["ratio"], settings.BRIEF_DEFAULTS["ratio"],
+                         "the bad key did not fall back")
+        self.assertEqual(brief["max_sentences"], 7,
+                         "a good key was thrown away with the bad one")
+        self.assertTrue(any("ratio" in w for w in settings.warnings),
+                        "the rejection was not logged")
+
+    def test_an_out_of_range_ratio_is_rejected(self):
+        for bad in (0, -0.5, 1.5):
+            self.write({"brief": {"ratio": bad}})
+            brief = settings.load()["brief"]
+            self.assertEqual(brief["ratio"], settings.BRIEF_DEFAULTS["ratio"],
+                             f"ratio {bad} was accepted")
+            self.assertTrue(settings.warnings)
+
+    def test_a_negative_sentence_count_is_rejected(self):
+        self.write({"brief": {"min_sentences": 0, "max_sentences": -4}})
+        brief = settings.load()["brief"]
+        self.assertEqual(brief["min_sentences"],
+                         settings.BRIEF_DEFAULTS["min_sentences"])
+        self.assertEqual(brief["max_sentences"],
+                         settings.BRIEF_DEFAULTS["max_sentences"])
+        self.assertEqual(len(settings.warnings), 2)
+
+    def test_an_inverted_pair_is_straightened_out(self):
+        self.write({"brief": {"min_sentences": 9, "max_sentences": 4}})
+        brief = settings.load()["brief"]
+        self.assertGreaterEqual(brief["max_sentences"], brief["min_sentences"])
+        self.assertTrue(settings.warnings)
+
+    def test_a_brief_section_of_the_wrong_shape_does_not_crash(self):
+        for junk in ("nonsense", 12, [1, 2, 3]):
+            self.write({"brief": junk})
+            brief = settings.load()["brief"]
+            self.assertEqual(brief, settings.BRIEF_DEFAULTS)
+            self.assertTrue(settings.warnings)
+
+    def test_a_file_that_is_not_json_at_all_falls_back(self):
+        self.path.write_text("{ this is not json", "utf-8")
+        self.assertEqual(settings.load()["brief"], settings.BRIEF_DEFAULTS)
+
+    def test_zero_min_chars_is_allowed(self):
+        """Legitimate: it turns the short-text bypass off."""
+        self.write({"brief": {"min_chars": 0}})
+        self.assertEqual(settings.load()["brief"]["min_chars"], 0)
+        self.assertEqual(settings.warnings, [])
+
+    def test_saving_does_not_disturb_the_brief_section(self):
+        self.write({"brief": {"max_sentences": 5}, "voice": "Zira"})
+        values = settings.load()
+        settings.save(values)
+        again = settings.load()
+        self.assertEqual(again["brief"]["max_sentences"], 5)
+        self.assertEqual(again["voice"], "Zira")
 
 
 class PlanWithSummaryMode(unittest.TestCase):

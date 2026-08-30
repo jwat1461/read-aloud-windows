@@ -81,6 +81,7 @@ CMD_AUTO_READ = 7
 CMD_NEXT = 8
 CMD_SUMMARY = 9
 CMD_FULL = 10
+CMD_BRIEF = 11
 CMD_VOICE_BASE = 1000
 CMD_RATE_BASE = 2000
 CMD_VOLUME_BASE = 3000
@@ -310,6 +311,9 @@ class TrayBackend(threading.Thread):
             MF_STRING | (MF_CHECKED if snap.get("summary_mode") else 0),
             CMD_SUMMARY,
             "Summary mode\tCtrl+Alt+S",
+        )
+        user32.AppendMenuW(
+            menu, MF_STRING, CMD_BRIEF, "Brief me\tCtrl+Alt+B"
         )
         user32.AppendMenuW(
             menu, MF_STRING, CMD_FULL, "Read full text\tCtrl+Alt+F"

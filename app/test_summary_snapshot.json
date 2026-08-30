@@ -2,6 +2,7 @@
   "01_escalation": {
     "bypass": null,
     "picked": [
+      "The\nclient has asked three times now and is threatening to ask for a refund.",
       "It costs $4000 a month\nto keep both environments alive while this drags on.",
       "The deadline was Friday\nand it is now Tuesday."
     ]
@@ -10,13 +11,15 @@
     "bypass": null,
     "picked": [
       "Two people asked about transport,\nwhich we still cannot help with.",
-      "We are late filing the annual\nreturn and the deadline has already passed once."
+      "We are late filing the annual\nreturn and the deadline has already passed once.",
+      "We should decide\nabout the venue before September."
     ]
   },
   "03_release_notes": {
     "bypass": null,
     "picked": [
       "This release adds a tray icon with voice, speed and volume controls.",
+      "It fixes\nDOM offset clamping in the extension.",
       "It fixes TTS error storms that could\nfill the log."
     ]
   },
@@ -24,11 +27,12 @@
     "bypass": null,
     "picked": [
       "The roses came back after the frost and the\nhedge has thickened up nicely.",
+      "Next spring we\nmight put in a second bed along the fence.",
       "There is a blackbird nesting in the\nivy again."
     ]
   },
   "05_paragraphs": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "First paragraph, one sentence only.",
       "Second paragraph opens here.",
@@ -37,7 +41,7 @@
     ]
   },
   "06_abbreviations": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "Dr.",
       "Adeyemi signed off at 4 p.m.",
@@ -52,7 +56,7 @@
     ]
   },
   "07_questions": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "Why did the job fail?",
       "Was anyone paged?",
@@ -62,7 +66,7 @@
     ]
   },
   "08_unicode": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "El proceso falló otra vez — nadie sabe por qué.",
       "La fecha límite era el\nviernes…",
@@ -80,7 +84,7 @@
     ]
   },
   "10_lists_and_numbers": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "Three things went wrong.",
       "1.",
@@ -94,7 +98,7 @@
     ]
   },
   "11_quotes": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "\"We cannot ship this,\" she said.",
       "\"Not on Friday.\"",
@@ -104,7 +108,7 @@
     ]
   },
   "12_mixed_whitespace": {
-    "bypass": "too few words",
+    "bypass": "too short",
     "picked": [
       "Leading whitespace here.",
       "A tab follows the first sentence.",

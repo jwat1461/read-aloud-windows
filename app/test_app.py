@@ -40,13 +40,14 @@ def setUpModule():
     import tempfile
     from pathlib import Path as _Path
     import summarize as _s
-    _REAL_LOG = _s.LOG_PATH
-    _s.LOG_PATH = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+    _REAL_LOG = _s.default_log_path
+    scratch = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+    _s.default_log_path = lambda: scratch
 
 
 def tearDownModule():
     import summarize as _s
-    _s.LOG_PATH = _REAL_LOG
+    _s.default_log_path = _REAL_LOG
 
 
 def pump(app, seconds, until=None):

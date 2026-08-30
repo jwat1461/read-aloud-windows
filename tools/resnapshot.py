@@ -28,12 +28,15 @@ def main() -> int:
     # A temporary rules file, so a tuned copy in %APPDATA% cannot leak into the
     # snapshot and make it unreproducible on anybody else's machine.
     rules = summarize.load_rules(Path(tempfile.mkdtemp()) / "rules.json")
+    # And a temporary log, so re-recording the snapshot never appends a dozen
+    # rows to the diary the tuning report reads.
+    log = Path(tempfile.mkdtemp()) / "summary_log.jsonl"
 
     recorded = {}
     for name in sorted(golden):
         text = golden[name]["text"]
         reason = summarize.bypass_reason(text)
-        picked = summarize.summarize(text, rules)
+        picked = summarize.summarize(text, rules, source="test", log_path=log)
         recorded[name] = {"bypass": reason, "picked": picked}
 
         print(f"--- {name}  ({reason or f'summarized, {len(picked)} sentences'})")

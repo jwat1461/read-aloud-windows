@@ -58,12 +58,36 @@ def main() -> int:
         print(f"{path} is empty.")
         return 1
 
+    # Startup rows say which weights the rows after them were scored with. They
+    # are not calls, so they must not land in any of the per-call counts.
+    weight_rows = [r for r in rows if r.get("event") == "weights"]
+    rows = [r for r in rows if r.get("event") != "weights"]
+    if not rows:
+        print(f"{path} holds no scored calls yet.")
+        return 1
+
     print(f"{path}")
     print(f"{len(rows)} calls, {rows[0]['timestamp']} to {rows[-1]['timestamp']}")
 
+    if weight_rows:
+        latest = weight_rows[-1]
+        section("Weights in force (most recent startup)")
+        budget = latest.get("budget", {})
+        print(f"  rules version {latest.get('rules_version')}, "
+              f"negation window {latest.get('negation_window')}")
+        for name, value in sorted(latest.get("weights", {}).items()):
+            print(f"  {name:<18} {value}")
+        if budget:
+            print(f"  budget: ratio {budget.get('ratio')}, "
+                  f"k {budget.get('min_sentences')}-{budget.get('max_sentences')}, "
+                  f"min chars {budget.get('min_chars')}")
+        if len(weight_rows) > 1:
+            print(f"  ({len(weight_rows)} startups recorded; "
+                  f"scores above may span more than one weight set)")
+
     # ------------------------------------------------------------ by source
     section("Calls by source")
-    sources = collections.Counter(r.get("source", "unknown") for r in rows)
+    sources = collections.Counter(r.get("source", "unlabelled") for r in rows)
     for name, count in sources.most_common():
         print(f"  {name:<10} {count:4}  {bar(count, len(rows))}")
 

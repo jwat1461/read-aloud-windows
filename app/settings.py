@@ -19,6 +19,18 @@ SUMMARY_ENGINES = ("extractive", "ollama")
 # wondering why a hand-edited file did nothing.
 warnings: list[str] = []
 
+# How long a summary is allowed to be, and when one is worth making at all.
+# This is the only place the budget lives: summary_rules.json carries scoring
+# weights and nothing else, so "how it ranks" and "how much it keeps" cannot
+# drift apart in two files. Both the brief hotkey and the auto-read queue read
+# these, because one budget in one place was the point.
+BRIEF_DEFAULTS: dict = {
+    "ratio": 0.2,
+    "min_sentences": 3,
+    "max_sentences": 12,
+    "min_chars": 400,
+}
+
 DEFAULTS: dict = {
     "voice": "",
     "rate": 0,
@@ -30,6 +42,7 @@ DEFAULTS: dict = {
     "summary_model": "llama3.2",
     "summary_host": LOCAL_HOST,
     "log_sentence_text": False,
+    "brief": BRIEF_DEFAULTS,
 }
 
 SETTINGS_PATH = (
@@ -42,15 +55,60 @@ def _reject(message: str) -> None:
     print(f"ReadAloud settings: {message}", file=sys.stderr)
 
 
+def _brief(stored: object) -> dict:
+    """The budget section, coerced a key at a time.
+
+    A hand-edited file gets to be wrong about one key without losing the other
+    three, and every rejection says so out loud rather than silently reverting.
+    """
+    values = dict(BRIEF_DEFAULTS)
+    if stored is None:
+        return values
+    if not isinstance(stored, dict):
+        _reject(f"brief section is {type(stored).__name__}, not an object; "
+                f"using defaults")
+        return values
+
+    for key in BRIEF_DEFAULTS:
+        if key not in stored:
+            continue
+        raw = stored[key]
+        try:
+            if key == "ratio":
+                number = float(raw)
+                if not 0.0 < number <= 1.0:
+                    raise ValueError("ratio must be above 0 and at most 1")
+            else:
+                number = int(raw)
+                floor = 0 if key == "min_chars" else 1
+                if number < floor:
+                    raise ValueError(f"{key} must be at least {floor}")
+        except (TypeError, ValueError) as problem:
+            _reject(f"brief.{key} {raw!r} rejected ({problem}); "
+                    f"using {BRIEF_DEFAULTS[key]!r}")
+            continue
+        values[key] = number
+
+    # An inverted pair would make target_count() clamp to nonsense, and the
+    # user meant one of the two. Trust the floor and lift the ceiling to match.
+    if values["max_sentences"] < values["min_sentences"]:
+        _reject(f"brief.max_sentences {values['max_sentences']} is below "
+                f"min_sentences {values['min_sentences']}; raising it to match")
+        values["max_sentences"] = values["min_sentences"]
+    return values
+
+
 def load() -> dict:
     warnings.clear()
     values = dict(DEFAULTS)
+    values["brief"] = dict(BRIEF_DEFAULTS)
     try:
         stored = json.loads(SETTINGS_PATH.read_text("utf-8"))
     except (OSError, ValueError):
         return values
     if isinstance(stored, dict):
         values.update({k: stored[k] for k in DEFAULTS if k in stored})
+    values["brief"] = _brief(stored.get("brief") if isinstance(stored, dict) else None)
     # Hand-edited files are a fact of life; coerce rather than trust.
     values["auto_read_clipboard"] = bool(values["auto_read_clipboard"])
     values["summary_mode"] = bool(values["summary_mode"])

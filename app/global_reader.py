@@ -7,6 +7,7 @@ voice, speed and volume, or to stop whatever is being read.
     Ctrl+Alt+C   read whatever is on the clipboard
     Ctrl+Alt+A   auto-read the clipboard, on / off
     Ctrl+Alt+S   summary mode, on / off
+    Ctrl+Alt+B   brief the selection once, without touching summary mode
     Ctrl+Alt+F   read the full untrimmed source of the current item
     Ctrl+Alt+N   skip to the next queued item
     Ctrl+Alt+P   pause / resume
@@ -39,6 +40,7 @@ from tkinter import ttk
 
 import reading
 import settings
+import summarize
 import tray
 from speech_engine import SpeechEngine, SpeechError
 
@@ -67,6 +69,7 @@ HOTKEY_AUTO_READ = 5
 HOTKEY_NEXT = 6
 HOTKEY_SUMMARY = 7
 HOTKEY_FULL = 8
+HOTKEY_BRIEF = 9
 
 _MODS = tray.MOD_CONTROL | tray.MOD_ALT | tray.MOD_NOREPEAT
 
@@ -76,6 +79,7 @@ HOTKEYS = {
     HOTKEY_AUTO_READ: (_MODS, ord("A"), "Ctrl+Alt+A", "Auto-read clipboard on/off"),
     HOTKEY_NEXT: (_MODS, ord("N"), "Ctrl+Alt+N", "Skip to next queued"),
     HOTKEY_SUMMARY: (_MODS, ord("S"), "Ctrl+Alt+S", "Summary mode on/off"),
+    HOTKEY_BRIEF: (_MODS, ord("B"), "Ctrl+Alt+B", "Brief the selection"),
     HOTKEY_FULL: (_MODS, ord("F"), "Ctrl+Alt+F", "Read the full source"),
     HOTKEY_PAUSE: (_MODS, ord("P"), "Ctrl+Alt+P", "Pause / resume"),
     HOTKEY_STOP: (_MODS, ord("X"), "Ctrl+Alt+X", "Stop"),
@@ -305,6 +309,25 @@ class GlobalReader(tk.Tk):
         self._own_clip_from: int | None = None
         self._own_clip_to: int | None = None
         self._paused_needs_restart = False
+        # Set while a capture is on its way back, so _collect_copy knows whether
+        # Ctrl+Alt+R or Ctrl+Alt+B asked for it.
+        self._capture_brief = False
+        # Spoken after the last sentence of a brief, then cleared.
+        self.brief_trailer: str | None = None
+
+        # One scorer for this process, so the hotkey and the auto-read queue
+        # cannot drift apart, and so the duplicate window actually spans presses:
+        # a summarizer built per call would never recognise a repeat.
+        self.summarizer = summarize.ExtractiveSummarizer(
+            log_path=summarize.default_log_path(),
+            source="hotkey",
+            budget=summarize.Budget.from_settings(self.prefs["brief"]),
+        )
+        # Once, here, not per read: the scores in the log are unreadable without
+        # knowing which weights produced them.
+        summarize.log_weight_set(
+            self.summarizer.log_path, "hotkey", budget=self.summarizer.budget
+        )
 
         self._build_ui()
 
@@ -579,8 +602,15 @@ class GlobalReader(tk.Tk):
             return True  # still mid copy-and-restore
         return self._own_clip_from < seq <= self._own_clip_to
 
-    def _capture_selection(self) -> None:
-        """Copy the focused window's selection, then read it."""
+    def _capture_selection(self, brief: bool = False) -> None:
+        """Copy the focused window's selection, then read it.
+
+        `brief` changes only what happens to the text once it arrives. The copy,
+        the restore and the own-copy suppression window are shared with
+        Ctrl+Alt+R rather than repeated, so the two paths cannot disagree about
+        the clipboard.
+        """
+        self._capture_brief = brief
         self._begin_own_clipboard()
         self._saved_clipboard = self._read_clipboard()
         try:
@@ -589,23 +619,37 @@ class GlobalReader(tk.Tk):
             pass
 
         send_copy()
-        self._set_status("Reading selection…")
+        self._set_status("Briefing selection…" if brief else "Reading selection…")
         self.after(120, self._collect_copy, 0)
 
     def _collect_copy(self, waited: int) -> None:
+        brief = self._capture_brief
         text = self._read_clipboard()
         if text.strip():
             self._restore_clipboard_later()
-            self.speak(text, "selection")
+            self._capture_brief = False
+            if brief:
+                # Only the brief path asks. Ctrl+Alt+R has never checked, and
+                # quietly changing what it reads is not this build's business.
+                if clipboard_is_private():
+                    self._set_status("Selection is marked private — not briefed")
+                    return
+                self.speak(text, "selection", summary=True, brief=True)
+            else:
+                self.speak(text, "selection")
             return
 
         if waited < CLIPBOARD_WAIT_MS:
             self.after(60, self._collect_copy, waited + 60)
             return
 
+        # Timed out with nothing. Restore exactly as the read path does; the
+        # brief path inherits this rather than repeating it.
         self._restore_clipboard_later()
+        self._capture_brief = False
         self._set_status(
-            "No text selected — highlight something first, then press Ctrl+Alt+R"
+            "No text selected — highlight something first, then press "
+            + ("Ctrl+Alt+B" if brief else "Ctrl+Alt+R")
         )
 
     def _restore_clipboard_later(self) -> None:
@@ -721,6 +765,33 @@ class GlobalReader(tk.Tk):
             else "Summary mode is off"
         )
 
+    def brief_selection(self) -> None:
+        """Ctrl+Alt+B — summarize the selection once and say it.
+
+        Summary mode is left exactly where it was: this is a single request, not
+        a mode. Anything already speaking is interrupted the way Ctrl+Alt+F
+        interrupts, with advance=False, so the auto-read queue keeps its place
+        and resumes once the brief finishes.
+        """
+        if self.state_name != "idle":
+            self.engine.stop()
+            self._finish(advance=False)
+        self._capture_selection(brief=True)
+
+    def brief_clipboard(self) -> None:
+        """The tray item. Same path, but on what is already on the clipboard."""
+        if clipboard_is_private():
+            self._set_status("Clipboard is marked private — not briefed")
+            return
+        text = self._read_clipboard()
+        if not text.strip():
+            self._set_status("Clipboard is empty")
+            return
+        if self.state_name != "idle":
+            self.engine.stop()
+            self._finish(advance=False)
+        self.speak(text, "clipboard", summary=True, brief=True)
+
     def read_full_source(self) -> None:
         """Ctrl+Alt+F. Works whether or not summary mode is on -- when it is
         off this is simply a re-read, which is a reasonable thing to want."""
@@ -748,13 +819,16 @@ class GlobalReader(tk.Tk):
         scope: str,
         summary: bool | None = None,
         source: str = "hotkey",
+        brief: bool = False,
     ) -> None:
         if summary is None:
             summary = bool(self.prefs["summary_mode"])
+        self.summarizer.source = source
         plan = reading.plan(
             text,
             summary=summary,
             source=source,
+            summarizer=self.summarizer,
             engine=self.prefs["summary_engine"],
             model=self.prefs["summary_model"],
             # Only ever called when a model is about to be asked, so the wait
@@ -764,14 +838,37 @@ class GlobalReader(tk.Tk):
         if plan.fell_back:
             self.model_unavailable = True
         if not plan:
-            self._set_status("Nothing to read")
+            self._set_status(
+                "Nothing to brief" if brief else "Nothing to read"
+            )
+            if brief:
+                self.engine.speak(reading.NOTHING)
             return
+
+        # The same text again inside the duplicate window. Say so once rather
+        # than reading the identical brief a second time.
+        if brief and plan.bypass == "duplicate":
+            self._set_status("Same as the last brief")
+            self.engine.speak(reading.DUPLICATE)
+            return
+
         self.last_source = plan.source
         self.pieces = plan.sentences
         self.cue_pending = plan.summarized
+        self.brief_trailer = (
+            reading.BRIEF_END.format(kept=plan.n_output, total=plan.n_input)
+            if brief and plan.summarized
+            else None
+        )
+        self._brief = brief and plan.summarized
         self.index = 0
         self.state_name = "speaking"
-        self.scope = f"{scope} summary" if plan.summarized else scope
+        if brief and plan.summarized:
+            self.scope = f"{scope} brief"
+        elif plan.summarized:
+            self.scope = f"{scope} summary"
+        else:
+            self.scope = scope
         self._sync_buttons()
         self._speak_current()
 
@@ -785,8 +882,14 @@ class GlobalReader(tk.Tk):
             # Prefixed to the utterance, not inserted into `pieces`: a second
             # engine.speak() would cancel the first, and a fake sentence would
             # throw off every span behind it.
-            spoken = f"{reading.CUE} {spoken}"
+            cue = reading.BRIEF_CUE if getattr(self, "_brief", False) else reading.CUE
+            spoken = f"{cue} {spoken}"
             self.cue_pending = False
+        if self.brief_trailer and self.index == len(self.pieces) - 1:
+            # Appended for the same reason the cue is prefixed, and consumed so
+            # that resuming the last sentence cannot say it twice.
+            spoken = f"{spoken} {self.brief_trailer}"
+            self.brief_trailer = None
         self.engine.speak(spoken)
         status = f"Reading {self.scope} — sentence {self.index + 1} of {len(self.pieces)}"
         if self.auto_queue:
@@ -835,6 +938,8 @@ class GlobalReader(tk.Tk):
         self.pieces = []
         self.index = 0
         self.cue_pending = False
+        self.brief_trailer = None
+        self._brief = False
         self.awaiting_speak_ack = False
         self._announcing = False
         self._paused_needs_restart = False
@@ -891,6 +996,8 @@ class GlobalReader(tk.Tk):
             self.skip_to_next()
         elif hotkey_id == HOTKEY_SUMMARY:
             self.toggle_summary_mode()
+        elif hotkey_id == HOTKEY_BRIEF:
+            self.brief_selection()
         elif hotkey_id == HOTKEY_FULL:
             self.read_full_source()
         elif hotkey_id == HOTKEY_PAUSE:
@@ -911,6 +1018,8 @@ class GlobalReader(tk.Tk):
             self.skip_to_next()
         elif command == tray.CMD_SUMMARY:
             self.toggle_summary_mode()
+        elif command == tray.CMD_BRIEF:
+            self.brief_clipboard()
         elif command == tray.CMD_FULL:
             self.read_full_source()
         elif command == tray.CMD_PAUSE:

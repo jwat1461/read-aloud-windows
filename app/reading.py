@@ -36,6 +36,19 @@ CUE = "Summary."
 # wait. The extractive path is instant and gets no such warning.
 WORKING = "Summarizing."
 
+# Spoken around a brief. The opener tells the listener this is not the whole
+# thing; the trailer says how much was dropped, which is the number that decides
+# whether they want to hear the source.
+BRIEF_CUE = "Brief:"
+BRIEF_END = "End of brief. {kept} sentences from {total}."
+
+# Said when the same text is briefed twice inside the duplicate window. Speaking
+# the same summary again is the one thing a listener cannot tell from a bug.
+DUPLICATE = "Same as the last brief."
+
+# Said when there is nothing to work with at all.
+NOTHING = "Nothing to brief."
+
 
 @dataclass(frozen=True)
 class ReadingPlan:
@@ -52,6 +65,12 @@ class ReadingPlan:
     summarized: bool = False
     engine: str = "extractive"
     fell_back: bool = False
+    # Why the text was left alone, when it was. The brief path speaks a
+    # different line for a duplicate than for a passage too short to trim, and
+    # without this it would have to ask the summarizer a second time to find out.
+    bypass: str | None = None
+    n_input: int = 0
+    n_output: int = 0
 
     @property
     def sentences(self) -> list[str]:
@@ -89,7 +108,8 @@ def plan(
     engine: str | None = None,
     model: str | None = None,
     before_model=None,
-    source: str = "unknown",
+    source: str = "app",
+    summarizer: summarize.Summarizer | None = None,
 ) -> ReadingPlan:
     """Split `text` into the sentences to be spoken.
 
@@ -105,6 +125,12 @@ def plan(
     `before_model` is called immediately before an Ollama request and not at all
     otherwise, so a caller can say "Summarizing" out loud without having to work
     out for itself whether the model is going to be asked.
+
+    `summarizer` is the scorer to use. A caller that holds one across presses --
+    the tray reader does -- passes it in, because the duplicate window lives on
+    the instance and a fresh one every time would never see a repeat. Left out,
+    one is built for this call against the real log, which is what the desktop
+    app wants and what makes this function usable on its own.
 
     The Ollama request is synchronous. With the model resident -- which is what
     the warm-up is for -- it returns in well under a second; the 20-second read
@@ -125,28 +151,39 @@ def plan(
         if model is None:
             model = stored["summary_model"]
 
+        if summarizer is None:
+            summarizer = summarize.ExtractiveSummarizer(
+                log_path=summarize.default_log_path(),
+                source=source,
+                rules=rules,
+                budget=summarize.Budget.from_settings(),
+            )
+
         kept = None
         fell_back = False
+        result = None
         # Bypass first: code, a URL and short text are no better through a
         # model, and there is no reason to make anyone wait to learn that.
-        if summarize.bypass_reason(text) is None and engine == "ollama":
+        if summarize.bypass_reason(text, budget=summarizer.budget) is None and engine == "ollama":
             kept = _model_sentences(text, model, before_model)
             fell_back = kept is None
         if kept is None:
-            kept = summarize.summarize(text, rules, source=source)
+            result = summarizer.summarize(text)
+            kept = result.sentences
         else:
             # The model answered, so summarize() never ran and never logged.
             # Record the run anyway, or an ollama session leaves no trail.
             summarize.log_run({
                 "timestamp": summarize.now_iso(),
-                "source": source,
+                "event": "summary",
+                "source": summarizer.source,
                 "sentence_count": len(spans),
                 "word_count": len(summarize._WORD.findall(text.lower())),
                 "bypass_reason": None,
                 "k": len(kept),
                 "engine": "ollama",
                 "picked": [],
-            })
+            }, summarizer.log_path)
 
         if kept != [piece for _s, _e, piece in spans]:
             summary_text, pieces = _stitch(kept)
@@ -157,9 +194,19 @@ def plan(
                 summarized=True,
                 engine="extractive" if fell_back or engine != "ollama" else "ollama",
                 fell_back=fell_back,
+                n_input=result.n_input if result else len(spans),
+                n_output=result.n_output if result else len(kept),
             )
-        # Summarizer declined — too short to be worth it. Fall through, so a
-        # bypass is indistinguishable from the mode being off.
+        # Summarizer declined — too short to be worth it, a duplicate, or a
+        # table. Fall through so an ordinary bypass stays indistinguishable from
+        # the mode being off, but carry the reason out for the brief path, which
+        # has something different to say about a repeat.
+        bypass = result.bypass if result else None
+        pieces = [(s + offset, e + offset, piece) for s, e, piece in spans]
+        return ReadingPlan(text=text, source=text, pieces=pieces,
+                           summarized=False, bypass=bypass,
+                           n_input=len(spans), n_output=len(spans))
 
     pieces = [(s + offset, e + offset, piece) for s, e, piece in spans]
-    return ReadingPlan(text=text, source=text, pieces=pieces, summarized=False)
+    return ReadingPlan(text=text, source=text, pieces=pieces, summarized=False,
+                       n_input=len(spans), n_output=len(spans))

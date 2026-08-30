@@ -103,13 +103,14 @@ def setUpModule():
     import tempfile
     from pathlib import Path as _Path
     import summarize as _s
-    _REAL_LOG = _s.LOG_PATH
-    _s.LOG_PATH = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+    _REAL_LOG = _s.default_log_path
+    scratch = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
+    _s.default_log_path = lambda: scratch
 
 
 def tearDownModule():
     import summarize as _s
-    _s.LOG_PATH = _REAL_LOG
+    _s.default_log_path = _REAL_LOG
 
 
 def pump(app, seconds, until=None):
@@ -380,6 +381,15 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertEqual(self.app.auto_queue, [])
         self.app.stop()
 
+    def _fresh_summarizer(self, source, budget=None):
+        """A scorer with no duplicate memory, for comparing two paths on the
+        same text without the second one being called a repeat."""
+        import summarize as _s
+        return _s.ExtractiveSummarizer(
+            log_path=self.app.summarizer.log_path, source=source,
+            budget=budget or self.app.summarizer.budget,
+        )
+
     def _record_engine(self):
         """Everything actually handed to SAPI, so the cue can be seen."""
         uttered = []
@@ -597,6 +607,192 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertIn("selection", self.app.status_var.get())
 
     # ------------------------------------------------------ voice / speed / volume
+
+    # ----------------------------------------------------------------- brief
+
+    def test_the_brief_hotkey_is_registered(self):
+        self.assertIn(global_reader.HOTKEY_BRIEF, HOTKEYS)
+        _mods, vk, label, _desc = HOTKEYS[global_reader.HOTKEY_BRIEF]
+        self.assertEqual(label, "Ctrl+Alt+B")
+        self.assertEqual(vk, ord("B"))
+
+    def test_the_brief_hotkey_captures_the_selection(self):
+        """Same capture as Ctrl+Alt+R: it must reuse that path, not repeat it."""
+        called = []
+        self.app._capture_selection = lambda brief=False: called.append(brief)
+        self.app._handle_hotkey(global_reader.HOTKEY_BRIEF)
+        self.assertEqual(called, [True], "the brief did not go through capture")
+
+    def test_a_captured_selection_is_briefed_and_the_clipboard_restored(self):
+        original = "something the user had copied earlier"
+        self.app.clipboard_clear()
+        self.app.clipboard_append(SUMMARY_FIXTURE)
+        self.app._saved_clipboard = original
+        self.app._capture_brief = True
+        self.app.update()
+
+        handed = []
+        real = self.app.summarizer.summarize
+        self.app.summarizer.summarize = lambda text: (handed.append(text)
+                                                      or real(text))
+
+        self.app._collect_copy(0)
+        self.assertEqual(self.app.state_name, "speaking")
+        self.assertEqual(len(handed), 1, "the summarizer was not handed the text")
+        self.assertEqual(handed[0], SUMMARY_FIXTURE)
+        self.assertLess(len(self.app.pieces), len(reading.plan(
+            SUMMARY_FIXTURE, summary=False).sentences))
+
+        self.app.stop()
+        self.app._restore_clipboard()
+        self.app.update()
+        self.assertEqual(self.app._read_clipboard(), original)
+
+    def test_a_brief_with_no_selection_behaves_exactly_as_a_read_does(self):
+        """Inherited, not reimplemented: the same timeout, the same restore."""
+        def outcome(brief):
+            self.app.clipboard_clear()
+            self.app.update()
+            self.app._saved_clipboard = "previous value"
+            self.app._capture_brief = brief
+            spoken = self._record_spoken()
+            self.app._collect_copy(global_reader.CLIPBOARD_WAIT_MS)
+            self.app.update()
+            self.app._restore_clipboard()
+            self.app.update()
+            return (self.app.state_name, list(spoken),
+                    self.app._read_clipboard(), self.app._saved_clipboard)
+
+        as_read = outcome(False)
+        as_brief = outcome(True)
+        self.assertEqual(as_read[0], as_brief[0], "state diverged")
+        self.assertEqual(as_read[1], [], "the read path spoke something")
+        self.assertEqual(as_brief[1], [], "the brief path spoke something")
+        self.assertEqual(as_read[2], as_brief[2], "clipboard diverged")
+        self.assertIsNone(as_brief[3])
+        self.assertIn("No text selected", self.app.status_var.get())
+        self.assertIn("Ctrl+Alt+B", self.app.status_var.get())
+
+    def test_a_brief_speaks_the_opener_and_the_closing_count(self):
+        uttered = self._record_engine()
+        self.app.speak(SUMMARY_FIXTURE, "selection", summary=True, brief=True)
+        self.assertTrue(uttered)
+        self.assertTrue(
+            uttered[0].startswith(reading.BRIEF_CUE), f"no opener: {uttered[0]!r}"
+        )
+        self.app.set_rate(8)
+        self.assertTrue(
+            pump(self.app, 45, lambda: self.app.state_name == "idle"),
+            "the brief never finished",
+        )
+        self.assertTrue(
+            uttered[-1].endswith("."), "the trailer was not spoken last"
+        )
+        self.assertIn("End of brief.", uttered[-1])
+
+    def test_the_trailer_counts_what_was_kept_and_what_came_in(self):
+        plan = reading.plan(SUMMARY_FIXTURE, summary=True, source="hotkey",
+                            summarizer=self.app.summarizer)
+        expected = reading.BRIEF_END.format(kept=plan.n_output,
+                                            total=plan.n_input)
+        self.assertIn(str(plan.n_input), expected)
+        self.assertLess(plan.n_output, plan.n_input)
+
+    def test_a_brief_does_not_turn_summary_mode_on(self):
+        """A single request, not a mode. This is the whole point of Ctrl+Alt+B."""
+        self.assertFalse(self.app.prefs["summary_mode"])
+        self.app.speak(SUMMARY_FIXTURE, "selection", summary=True, brief=True)
+        self.assertFalse(self.app.prefs["summary_mode"],
+                         "the brief flipped the mode")
+        self.app.stop()
+        self.assertFalse(settings.load()["summary_mode"])
+
+    def test_short_text_is_briefed_verbatim_without_the_framing(self):
+        uttered = self._record_engine()
+        short = "The build failed. Nobody knows why yet. We are blocked."
+        self.app.speak(short, "selection", summary=True, brief=True)
+        self.assertTrue(uttered)
+        self.assertFalse(uttered[0].startswith(reading.BRIEF_CUE),
+                         "framed text it never trimmed")
+        self.app.stop()
+
+    def test_briefing_the_same_text_twice_says_so_instead(self):
+        self.app.speak(SUMMARY_FIXTURE, "selection", summary=True, brief=True)
+        self.app.stop()
+        uttered = self._record_engine()
+        self.app.speak(SUMMARY_FIXTURE, "selection", summary=True, brief=True)
+        self.assertEqual(uttered, [reading.DUPLICATE])
+        self.assertEqual(self.app.state_name, "idle")
+
+    def test_briefing_nothing_says_nothing_to_brief(self):
+        uttered = self._record_engine()
+        self.app.speak("   ", "selection", summary=True, brief=True)
+        self.assertEqual(uttered, [reading.NOTHING])
+        self.assertEqual(self.app.state_name, "idle")
+
+    def test_the_tray_item_briefs_the_clipboard(self):
+        self._clipboard(SUMMARY_FIXTURE)
+        self.app._handle_menu(tray.CMD_BRIEF)
+        self.assertEqual(self.app.state_name, "speaking")
+        self.assertIn("brief", self.app.scope)
+        self.app.stop()
+
+    def test_a_brief_leaves_the_auto_read_queue_where_it_was(self):
+        """It interrupts, it does not enqueue, and it does not clear."""
+        self.app.auto_queue = ["First queued item.", "Second queued item."]
+        self.app.speak(SUMMARY_FIXTURE, "selection", summary=True, brief=True)
+        self.assertEqual(len(self.app.auto_queue), 2, "the brief ate the queue")
+        self.app.stop()
+
+    def test_private_clipboard_content_is_never_briefed(self):
+        self._clipboard("a password", extra=((global_reader.CF_CLIPBOARD_HISTORY, 0),))
+        spoken = self._record_spoken()
+        self.app._handle_menu(tray.CMD_BRIEF)
+        self.assertEqual(spoken, [], "private content was briefed")
+        self.assertEqual(self.app.state_name, "idle")
+
+    def test_the_queue_and_the_hotkey_pick_the_same_sentences(self):
+        """One scorer, proven rather than assumed."""
+        from_hotkey = reading.plan(SUMMARY_FIXTURE, summary=True,
+                                   source="hotkey",
+                                   summarizer=self._fresh_summarizer("hotkey"))
+        from_queue = reading.plan(SUMMARY_FIXTURE, summary=True,
+                                  source="queue",
+                                  summarizer=self._fresh_summarizer("queue"))
+        self.assertTrue(from_hotkey.summarized)
+        self.assertEqual(from_hotkey.sentences, from_queue.sentences)
+        self.assertEqual(from_hotkey.n_output, from_queue.n_output)
+
+    def test_the_queue_path_respects_the_settings_budget(self):
+        """The budget moved into settings.json; the queue reads it too."""
+        import summarize as _s
+        wide = _s.Budget(ratio=0.9, min_sentences=1, max_sentences=99,
+                         min_chars=0)
+        # ratio 0.9 would keep nearly everything; the ceiling has to bind.
+        capped = _s.Budget(ratio=0.9, min_sentences=1, max_sentences=2,
+                           min_chars=0)
+        # ratio 0.01 would keep one; the floor has to bind.
+        floored = _s.Budget(ratio=0.01, min_sentences=4, max_sentences=99,
+                            min_chars=0)
+        many = reading.plan(SUMMARY_FIXTURE, summary=True, source="queue",
+                            summarizer=self._fresh_summarizer("queue", wide))
+        few = reading.plan(SUMMARY_FIXTURE, summary=True, source="queue",
+                           summarizer=self._fresh_summarizer("queue", capped))
+        least = reading.plan(SUMMARY_FIXTURE, summary=True, source="queue",
+                             summarizer=self._fresh_summarizer("queue", floored))
+        self.assertGreater(len(many.sentences), len(few.sentences))
+        self.assertEqual(len(few.sentences), 2, "the ceiling did not bind")
+        self.assertEqual(len(least.sentences), 4, "the floor did not bind")
+
+    def test_the_weight_set_was_recorded_once_at_startup(self):
+        import json as _json
+        rows = [_json.loads(line) for line
+                in self.app.summarizer.log_path.read_text("utf-8").splitlines()
+                if line.strip()]
+        weights = [r for r in rows if r.get("event") == "weights"]
+        self.assertTrue(weights, "no weight set was written at startup")
+        self.assertEqual(weights[0]["source"], "hotkey")
+
 
     def test_volume_control_changes_the_setting(self):
         self.app.set_volume(35)
