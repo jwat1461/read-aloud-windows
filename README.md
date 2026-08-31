@@ -400,17 +400,17 @@ powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Quiet     # no sound, no
 powershell -ExecutionPolicy Bypass -File run_tests.ps1 -Browser   # extension DOM suite
 ```
 
-201 tests across eight suites:
+301 tests across eight suites:
 
 | Suite | Tests | What it covers |
 |---|---|---|
 | `chunker` | 11 | Sentence splitting: punctuation, paragraphs, long runs, unicode |
-| `summary` | 48 | The extractive summarizer: bypasses, negation windows, determinism, the rules file and its migration, the score log, the corpus snapshot |
+| `summary` | 118 | The extractive summarizer: bypasses, negation windows, determinism, the rules file and its migration, the score log, the corpus snapshot |
 | `model` | 29 | The optional Ollama tier against a real local stub server: request shape, warm-up, every failure mode |
 | `parity` | 5 | The Python and JavaScript chunkers produce identical sentences |
 | `engine` | 11 | Live round trip against the PowerShell SAPI server, including WAV output |
 | `app` | 25 | Drives the real Tk window: playback, highlighting, seeking, settings, the summary pane |
-| `global` | 56 | Real system hotkeys and tray icon, menu commands, clipboard capture, auto-read and its queue, single-instance guard, summary mode |
+| `global` | 84 | Real system hotkeys and tray icon, menu commands, clipboard capture and contention, auto-read and its queue, single-instance guard, window-class lifetime, summary mode, the brief and its duplicate guard |
 | `dom` | 18 | Extension text extraction, DOM range mapping and highlighting, in Chrome |
 
 `summary` and `model` are silent and need nothing running: the Ollama tests
@@ -418,11 +418,14 @@ start their own HTTP server on 127.0.0.1 and point the client at it, so the
 connection, both timeouts and the JSON handling are genuinely exercised rather
 than mocked. The corpus snapshot in `app/test_summary_snapshot.json` records
 what the summarizer picks and fails on any drift; regenerate it deliberately
-with `python tools
-esnapshot.py` and read the diff before committing it.
+with `python tools\resnapshot.py` and read the diff before committing it.
 
 The `engine`, `app` and `global` suites make sound (at low volume) and briefly
 open windows, because they exercise the real speech engine rather than a mock.
+
+`global` skips its hotkey check when the installed reader is already running:
+that copy owns every `Ctrl+Alt` combination while it is up, so quit it from the
+tray if you want that one checked.
 
 The `dom` suite runs in a browser, because flattening a real document and
 mapping sentences back onto DOM ranges is exactly what a mock would not test.

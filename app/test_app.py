@@ -32,22 +32,38 @@ LONG_SAMPLE = (
 
 
 _REAL_LOG = None
+_REAL_SETTINGS = None
 
 
 def setUpModule():
     """Keep the score log out of the user's real %APPDATA% while testing."""
-    global _REAL_LOG
+    global _REAL_LOG, _REAL_SETTINGS
     import tempfile
     from pathlib import Path as _Path
     import summarize as _s
+    import json
+    import settings
     _REAL_LOG = _s.default_log_path
     scratch = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
     _s.default_log_path = lambda: scratch
 
+    # The suite drives the real app, and changing voice, speed or volume
+    # persists through settings.save() to the shared file the installed copy
+    # reads. A test run must never leave somebody's reader muted, so the whole
+    # suite writes to a scratch settings file instead of %APPDATA%.
+    _REAL_SETTINGS = settings.SETTINGS_PATH
+    scratch_settings = _Path(tempfile.mkdtemp()) / "settings.json"
+    scratch_settings.write_text(
+        json.dumps({k: v for k, v in settings.DEFAULTS.items()}), "utf-8"
+    )
+    settings.SETTINGS_PATH = scratch_settings
+
 
 def tearDownModule():
     import summarize as _s
+    import settings
     _s.default_log_path = _REAL_LOG
+    settings.SETTINGS_PATH = _REAL_SETTINGS
 
 
 def pump(app, seconds, until=None):

@@ -243,6 +243,12 @@ FONT_KEY = ("Cascadia Mono", 9)
 POLL_MS = 120
 CLIPBOARD_WAIT_MS = 700
 
+# Opening the clipboard is exclusive across the whole system, so a read
+# taken the instant after a copy loses to whatever else watches it. Short
+# tries, on the UI thread, adding up to well under a noticeable pause.
+CLIPBOARD_READ_TRIES = 12
+CLIPBOARD_READ_WAIT_S = 0.03
+
 # Most apps fire two or three clipboard updates per copy; wait for the burst to
 # go quiet rather than reading the same thing three times.
 AUTO_READ_DEBOUNCE_MS = 150
@@ -489,11 +495,18 @@ class GlobalReader(tk.Tk):
 
     def _sync_buttons(self) -> None:
         active = self.state_name != "idle"
-        self.pause_btn.configure(
-            state="normal" if active else "disabled",
-            text="Resume" if self.state_name == "paused" else "Pause",
-        )
-        self.stop_btn.configure(state="normal" if active else "disabled")
+        try:
+            self.pause_btn.configure(
+                state="normal" if active else "disabled",
+                text="Resume" if self.state_name == "paused" else "Pause",
+            )
+            self.stop_btn.configure(state="normal" if active else "disabled")
+        except tk.TclError:
+            # The engine can post a reply -- an EXIT especially -- after the
+            # window has been torn down, and configuring a destroyed widget
+            # raises rather than doing nothing. There are no buttons left to
+            # sync at that point, which is not a failure worth a crash log.
+            pass
 
     def _push_snapshot(self) -> None:
         """Give the tray thread what it needs to draw its menu and tooltip."""
@@ -578,10 +591,24 @@ class GlobalReader(tk.Tk):
     # ------------------------------------------------------------- clipboard
 
     def _read_clipboard(self) -> str:
-        try:
-            return self.clipboard_get(type="STRING")
-        except tk.TclError:
-            return ""
+        """The clipboard as text, or "" when there is genuinely nothing there.
+
+        A read that failed is not an empty clipboard. Tk raises the same
+        TclError either way, and the difference is audible: the reader says
+        "Clipboard is empty" out loud, so losing one race with a clipboard
+        manager makes it say that about text the user is looking at. Windows
+        will say whether text is on the clipboard without opening it, so retry
+        only while it says yes -- an empty clipboard still comes back at once.
+        """
+        for attempt in range(CLIPBOARD_READ_TRIES):
+            try:
+                return self.clipboard_get(type="STRING")
+            except tk.TclError:
+                if not clipboard_has_text():
+                    return ""
+                if attempt < CLIPBOARD_READ_TRIES - 1:
+                    time.sleep(CLIPBOARD_READ_WAIT_S)
+        return ""
 
     def _begin_own_clipboard(self) -> None:
         """Open the window in which clipboard changes are ours, not the user's.
@@ -745,7 +772,7 @@ class GlobalReader(tk.Tk):
             self._paused_needs_restart = True
 
     def toggle_summary_mode(self) -> None:
-        """Ctrl+Alt+M. Balloons rather than speaks: the mode changes what you
+        """Ctrl+Alt+S. Balloons rather than speaks: the mode changes what you
         are about to hear, so announcing it in the reading voice would be the
         one confusing way to say it."""
         on = not self.prefs["summary_mode"]
@@ -914,7 +941,7 @@ class GlobalReader(tk.Tk):
         self._push_snapshot()
 
     def stop(self) -> None:
-        """Ctrl+Alt+S. Empties the queue too — it is the only thing that does."""
+        """Ctrl+Alt+X. Empties the queue too — it is the only thing that does."""
         emptied = bool(self.auto_queue)
         self.auto_queue.clear()
         self.queue_dropped = False

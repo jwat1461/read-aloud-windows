@@ -149,6 +149,8 @@ user32.CreateWindowExW.argtypes = [
     wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
 ]
 user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.UnregisterClassW.restype = wintypes.BOOL
+user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
 user32.LoadImageW.restype = wintypes.HANDLE
 user32.LoadImageW.argtypes = [
     wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
@@ -567,3 +569,10 @@ class TrayBackend(threading.Thread):
         if self._hwnd:
             user32.DestroyWindow(self._hwnd)
             self._hwnd = None
+        if atom:
+            # The class name carries this thread's id, and Windows recycles
+            # those. Leaving it registered means a later tray thread handed the
+            # same id gets no window at all -- no icon, no clipboard listener,
+            # and nothing said about it. Must follow DestroyWindow: a class
+            # with a live window on it will not unregister.
+            user32.UnregisterClassW(cls.lpszClassName, instance)

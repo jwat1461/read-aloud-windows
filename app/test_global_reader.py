@@ -13,9 +13,11 @@ manager attaches are the whole point and Tk cannot write them.
 
 import ctypes
 import gc
+import json
 import subprocess
 import sys
 import time
+import tkinter as tk
 import unittest
 from ctypes import wintypes
 from pathlib import Path
@@ -46,6 +48,22 @@ user32.RegisterClipboardFormatW.restype = wintypes.UINT
 user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
 
 CF_BINARY_JUNK = user32.RegisterClipboardFormatW("ReadAloudTestBinary")
+
+user32.GetClassInfoW.restype = wintypes.BOOL
+user32.GetClassInfoW.argtypes = [
+    wintypes.HINSTANCE,
+    wintypes.LPCWSTR,
+    ctypes.POINTER(tray.WNDCLASSW),
+]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
+
+def window_class_exists(name) -> bool:
+    """True while `name` is still registered against this process."""
+    info = tray.WNDCLASSW()
+    instance = kernel32.GetModuleHandleW(None)
+    return bool(user32.GetClassInfoW(instance, name, ctypes.byref(info)))
 
 
 def _moveable(data: bytes):
@@ -81,6 +99,19 @@ def set_clipboard(hwnd, text=None, extra=()):
     finally:
         user32.CloseClipboard()
 
+
+def another_copy_is_running() -> bool:
+    """True when the installed reader is already up.
+
+    It holds every Ctrl+Alt hotkey for as long as it runs, so a suite that
+    starts a second reader cannot have them. Worth reporting as a skip rather
+    than a failure: nothing is wrong with the code, there are simply two copies.
+    """
+    handle, already = global_reader.claim_single_instance()
+    global_reader.release_single_instance(handle)
+    return already
+
+
 # Comfortably past the 4-sentence / 60-word bypass, so summary mode engages.
 SUMMARY_FIXTURE = (
     "The migration failed twice overnight before it finally finished. We are "
@@ -95,11 +126,12 @@ SUMMARY_FIXTURE = (
 
 
 _REAL_LOG = None
+_REAL_SETTINGS = None
 
 
 def setUpModule():
     """Keep the score log out of the user's real %APPDATA% while testing."""
-    global _REAL_LOG
+    global _REAL_LOG, _REAL_SETTINGS
     import tempfile
     from pathlib import Path as _Path
     import summarize as _s
@@ -107,10 +139,22 @@ def setUpModule():
     scratch = _Path(tempfile.mkdtemp()) / "summary_log.jsonl"
     _s.default_log_path = lambda: scratch
 
+    # The suite drives the real app, and changing voice, speed or volume
+    # persists through settings.save() to the shared file the installed copy
+    # reads. A test run must never leave somebody's reader muted, so the whole
+    # suite writes to a scratch settings file instead of %APPDATA%.
+    _REAL_SETTINGS = settings.SETTINGS_PATH
+    scratch_settings = _Path(tempfile.mkdtemp()) / "settings.json"
+    scratch_settings.write_text(
+        json.dumps({k: v for k, v in settings.DEFAULTS.items()}), "utf-8"
+    )
+    settings.SETTINGS_PATH = scratch_settings
+
 
 def tearDownModule():
     import summarize as _s
     _s.default_log_path = _REAL_LOG
+    settings.SETTINGS_PATH = _REAL_SETTINGS
 
 
 def pump(app, seconds, until=None):
@@ -204,6 +248,11 @@ class GlobalReaderBehaviour(unittest.TestCase):
     # ---------------------------------------------------------------- hotkeys
 
     def test_all_hotkeys_registered(self):
+        if another_copy_is_running():
+            self.skipTest(
+                "Read Aloud Anywhere is already running and owns the hotkeys; "
+                "quit it from the tray to check this one"
+            )
         self.assertEqual(
             self.app.tray.failed_hotkeys,
             [],
@@ -274,6 +323,23 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.app.tray.stop()
         self.app.tray.join(timeout=5)
         self.assertFalse(self.app.tray.is_alive())
+
+    def test_the_tray_unregisters_its_window_class(self):
+        """Its class name is built from a thread id, and Windows recycles those.
+
+        Leaving the class registered means the next tray thread handed the same
+        id cannot create its window at all: no icon, no clipboard listener, and
+        nothing said about either. Seen in the wild as a RegisterClassW failure
+        part way through a long run.
+        """
+        name = f"ReadAloudTray{self.app.tray._thread_id}"
+        self.assertTrue(window_class_exists(name), "the class was never registered")
+
+        self.app.tray.stop()
+        self.app.tray.join(timeout=5)
+        self.assertFalse(
+            window_class_exists(name), "the window class outlived the tray thread"
+        )
 
     def test_a_hotkey_clash_is_announced_and_not_swallowed(self):
         balloons = []
@@ -595,6 +661,65 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertEqual(self.app._read_clipboard(), original)
         self.assertIsNone(self.app._saved_clipboard)
 
+    def test_a_clipboard_another_app_grabbed_is_not_reported_empty(self):
+        """A failed read is not an empty clipboard.
+
+        Windows lets one process hold the clipboard at a time, so in the moment
+        after a copy -- while a clipboard manager or the history service is
+        still reading it -- Tk's get raises. The reader announces "Clipboard is
+        empty" out loud, and saying that about text you can see is the bug.
+        """
+        self._clipboard(SUMMARY_FIXTURE)
+        real_get = self.app.clipboard_get
+        refused = []
+
+        def grabbed(*args, **kwargs):
+            if len(refused) < 2:
+                refused.append(1)
+                # Tk's own wording, caught in the wild by reading the clipboard
+                # immediately after writing it with the reader running.
+                raise tk.TclError(
+                    "clipboard cannot be opened, another application grabbed it"
+                )
+            return real_get(*args, **kwargs)
+
+        self.app.clipboard_get = grabbed
+        try:
+            self.assertEqual(self.app._read_clipboard(), SUMMARY_FIXTURE)
+        finally:
+            self.app.clipboard_get = real_get
+        self.assertEqual(len(refused), 2, "the read never retried")
+
+    def test_a_clipboard_that_never_opens_gives_up(self):
+        """The retry runs on the UI thread, so it has to be bounded."""
+        self._clipboard(SUMMARY_FIXTURE)
+        real_get = self.app.clipboard_get
+
+        def always_grabbed(*args, **kwargs):
+            raise tk.TclError(
+                "clipboard cannot be opened, another application grabbed it"
+            )
+
+        self.app.clipboard_get = always_grabbed
+        started = time.monotonic()
+        try:
+            self.assertEqual(self.app._read_clipboard(), "")
+        finally:
+            self.app.clipboard_get = real_get
+        self.assertLess(
+            time.monotonic() - started, 2.0, "the retry sat on the UI thread too long"
+        )
+
+    def test_an_empty_clipboard_reads_as_empty_without_waiting(self):
+        """The retry is for contention only. Nothing on the clipboard has to
+        come back at once, or every capture pays the wait."""
+        self._clipboard(None)
+        started = time.monotonic()
+        self.assertEqual(self.app._read_clipboard(), "")
+        self.assertLess(
+            time.monotonic() - started, 0.2, "waited out a clipboard that was empty"
+        )
+
     def test_captured_selection_is_spoken(self):
         self.app.clipboard_clear()
         self.app.clipboard_append("Captured selection text. And a second part.")
@@ -793,6 +918,104 @@ class GlobalReaderBehaviour(unittest.TestCase):
         self.assertTrue(weights, "no weight set was written at startup")
         self.assertEqual(weights[0]["source"], "hotkey")
 
+    # ------------------------------------------- brief reaches the engine
+
+    def _brief_and_drain(self, text):
+        """Brief `text` through the capture path and return what the engine got.
+
+        Deliberately entered at _collect_copy rather than at speak(): that is
+        where the hotkey actually lands, and speak() rewrites state_name on the
+        way in, so a path that leaves the app wedged looks fine from there.
+        send_copy() is still never called -- it would inject a real Ctrl+C into
+        whatever window happens to be focused.
+        """
+        self.app.clipboard_clear()
+        self.app.clipboard_append(text)
+        self.app._saved_clipboard = "older clipboard"
+        self.app._capture_brief = True
+        self.app.update()
+
+        uttered = self._record_engine()
+        self.app.set_rate(8)
+        self.app._collect_copy(0)
+        pump(self.app, 45, lambda: self.app.state_name == "idle")
+        # Wedged state is the failure mode this whole group exists to catch.
+        self.assertEqual(self.app.state_name, "idle",
+                         "the brief path did not return to idle")
+        self.assertFalse(self.app._capture_brief, "the capture flag stuck on")
+        return list(uttered)
+
+    def test_a_brief_hands_every_picked_sentence_to_the_engine(self):
+        """Scoring and logging working proves nothing on its own: the picks
+        have to arrive at the player."""
+        plan = reading.plan(SUMMARY_FIXTURE, summary=True, source="hotkey",
+                            summarizer=self._fresh_summarizer("hotkey"))
+        self.assertTrue(plan.summarized, "the fixture stopped being summarized")
+
+        uttered = self._brief_and_drain(SUMMARY_FIXTURE)
+        self.assertEqual(len(uttered), len(plan.sentences),
+                         "the engine did not get one utterance per sentence")
+        for sentence, said in zip(plan.sentences, uttered):
+            self.assertIn(sentence, said, "a picked sentence never reached the engine")
+        self.assertTrue(uttered[0].startswith(reading.BRIEF_CUE))
+        self.assertIn("End of brief.", uttered[-1])
+
+    def test_a_verbatim_pass_through_reaches_the_engine_too(self):
+        """The bypass paths speak the source; they are not a silent return."""
+        short = "The build failed. Nobody knows why yet. We are blocked."
+        expected = reading.plan(short, summary=False).sentences
+
+        uttered = self._brief_and_drain(short)
+        self.assertEqual(len(uttered), len(expected))
+        for sentence, said in zip(expected, uttered):
+            self.assertIn(sentence, said, "verbatim text never reached the engine")
+        self.assertFalse(uttered[0].startswith(reading.BRIEF_CUE))
+
+    def test_the_brief_after_a_duplicate_still_reaches_the_engine(self):
+        """The regression the bug report named: a duplicate must not leave the
+        brief path in a state where the next one is silent."""
+        expected = reading.plan(SUMMARY_FIXTURE, summary=True, source="hotkey",
+                                summarizer=self._fresh_summarizer("hotkey")).sentences
+        first = self._brief_and_drain(SUMMARY_FIXTURE)
+        # Count, not "more than one": a dropped first sentence still leaves the
+        # rest audible, and "some noise came out" is not the assertion worth
+        # making about a handoff.
+        self.assertEqual(len(first), len(expected),
+                         "the first brief did not reach the engine intact")
+
+        repeat = self._brief_and_drain(SUMMARY_FIXTURE)
+        self.assertEqual(repeat, [reading.DUPLICATE])
+
+        other = (
+            "The venue put its rate up in March and the increase is not "
+            "sustainable past the summer. We are late filing the annual return "
+            "and the deadline has already passed once. The treasurer is away "
+            "until the end of the month, which leaves nobody able to sign the "
+            "forms. Attendance was steady through the quarter but the Tuesday "
+            "group has grown noticeably. Two people asked about transport, "
+            "which we still cannot help with. We should decide about the venue "
+            "before September or lose the slot entirely."
+        )
+        after_expected = reading.plan(other, summary=True, source="hotkey",
+                                      summarizer=self._fresh_summarizer("hotkey")).sentences
+        after = self._brief_and_drain(other)
+        self.assertEqual(len(after), len(after_expected),
+                         "silent or truncated after a duplicate -- the reported bug")
+        for sentence, said in zip(after_expected, after):
+            self.assertIn(sentence, said)
+        self.assertTrue(after[0].startswith(reading.BRIEF_CUE))
+        self.assertIn("End of brief.", after[-1])
+
+    def test_the_suite_never_writes_the_real_settings_file(self):
+        """A test run must not be able to leave the installed reader muted."""
+        self.assertNotEqual(settings.SETTINGS_PATH, _REAL_SETTINGS)
+        self.app.set_volume(3)
+        self.app.update()
+        self.assertFalse(
+            _REAL_SETTINGS.exists()
+            and json.loads(_REAL_SETTINGS.read_text("utf-8")).get("volume") == 3,
+            "the suite wrote the user's real settings file",
+        )
 
     def test_volume_control_changes_the_setting(self):
         self.app.set_volume(35)
